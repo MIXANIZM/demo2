@@ -569,37 +569,6 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
     );
   }
 
-
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-          child: TextField(
-            controller: _searchCtrl,
-            focusNode: _searchFocus,
-            decoration: InputDecoration(
-              hintText: widget.searchHint,
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(999)),
-            ),
-          ),
-        ),
-        Align(
-          alignment: Alignment.centerRight,
-          child: TextButton(
-            onPressed: () {
-              _searchCtrl.clear();
-              _searchFocus.unfocus();
-              setState(() => _searchMode = false);
-            },
-            child: const Text('Закрыть поиск'),
-          ),
-        ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final surface = Theme.of(context).colorScheme.surface;
