@@ -1,16 +1,16 @@
-import 'dart:async';
 import 'dart:convert';
-import 'dart:math' as math;
 
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/services.dart' show rootBundle;
 
-/// WhatsApp-like Emoji picker (works with emoji_picker_flutter 4.4.0):
-/// - Search bar on top (real search, async in 4.4.0).
-/// - One continuous vertical scroll: Recents -> Category1 -> Category2 -> ...
-/// - Bottom categories act like anchors (jump to section).
-/// - Dense grid (9 columns).
+/// Custom emoji picker "like WhatsApp":
+/// - Search icon; input field appears only after tap.
+/// - Recents at top (28 max). No empty space above.
+/// - One continuous vertical scroll (recents -> categories sequentially).
+/// - Bottom categories act like anchors.
+/// - Search uses assets/emoji/annotations_{en,ru}.json (supports simple or CLDR formats).
 class FullEmojiPicker extends StatefulWidget {
   final ValueChanged<Emoji> onEmojiSelected;
   final TextStyle? emojiTextStyle;
@@ -28,292 +28,237 @@ class FullEmojiPicker extends StatefulWidget {
 }
 
 class _FullEmojiPickerState extends State<FullEmojiPicker> {
-  static const int _recentsLimit = 28; // 7x4
   static const int _columns = 9;
-  static const double _emojiSize = 26;
+  static const int _recentsLimit = 28;
   static const double _hSpace = 6;
   static const double _vSpace = 6;
+  static const double _emojiFontSize = 26;
 
   final ScrollController _scroll = ScrollController();
   final TextEditingController _searchCtrl = TextEditingController();
   final FocusNode _searchFocus = FocusNode();
 
   bool _searchMode = false;
-  bool _searchIndexReady = false;
-  final Map<String, String> _emojiSearchIndex = <String, String>{};
-
-  final List<Emoji> _recents = <Emoji>[];
-
-  late final Map<Category, GlobalKey> _sectionKeys;
-  Category _activeCategory = Category.RECENT;
-
-  // Search caching to avoid flicker while typing.
-  String _lastQuery = '';
   Future<List<Emoji>>? _searchFuture;
 
+  // recents (local)
+  final List<Emoji> _recents = <Emoji>[];
+
+  // anchors
+  final Map<String, GlobalKey> _sectionKeys = <String, GlobalKey>{};
+
+  // index (emoji -> normalized keywords)
+  bool _indexReady = false;
+  String? _indexErr;
+  int _enCount = 0;
+  int _ruCount = 0;
+  final Map<String, String> _index = <String, String>{};
+
   @override
-  
-  // Remove common emoji modifiers so search can match base emoji:
-  // - variation selectors (FE0F/FE0E)
-  // - skin tone modifiers (1F3FB..1F3FF)
-  String _stripEmojiMods(String s) {
+  void initState() {
+    super.initState();
+    _initIndex();
+    _searchCtrl.addListener(() {
+      _searchFuture = null;
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    _searchCtrl.dispose();
+    _searchFocus.dispose();
+    super.dispose();
+  }
+
+  // remove variation selectors + skin tones
+  String _baseEmoji(String s) {
     if (s.isEmpty) return s;
-    // remove variation selectors
     s = s.replaceAll('\uFE0F', '').replaceAll('\uFE0E', '');
-    // remove Fitzpatrick skin tones
-    const tones = ['\u{1F3FB}','\u{1F3FC}','\u{1F3FD}','\u{1F3FE}','\u{1F3FF}'];
+    const tones = ['\u{1F3FB}', '\u{1F3FC}', '\u{1F3FD}', '\u{1F3FE}', '\u{1F3FF}'];
     for (final t in tones) {
       s = s.replaceAll(t, '');
     }
     return s;
   }
 
-void initState() {
-    super.initState();
-
-    _sectionKeys = {
-      Category.RECENT: GlobalKey(),
-      for (final item in defaultEmojiSet) (item as dynamic).category as Category: GlobalKey(),
-    };
-
-    _scroll.addListener(_onScroll);
-    _searchCtrl.addListener(_onSearchChanged);
-    _initSearchIndex();
+  String _norm(String s) {
+    final lower = s.toLowerCase().replaceAll('ё', 'е');
+    return lower
+        .replaceAll(RegExp(r'[^a-z0-9а-я ]+', unicode: true), ' ')
+        .replaceAll(RegExp(r' +'), ' ')
+        .trim();
   }
 
-  @override
-  void dispose() {
-    _scroll.removeListener(_onScroll);
-    _scroll.dispose();
-    _searchCtrl.removeListener(_onSearchChanged);
-    _searchCtrl.dispose();
-    _searchFocus.dispose();
-    super.dispose();
-  }
-
-  void _onSearchChanged() {
-    final q = _searchCtrl.text.trim();
-    if (q == _lastQuery) return;
-    _lastQuery = q;
-
-    if (q.isEmpty) {
-      setState(() {
-        _searchFuture = null;
-      });
-      return;
+  Map<String, List<String>> _extractAnnMap(dynamic root) {
+    // 1) Simple: { "😀": ["улыбка", ...], ... }
+    // 2) CLDR-like: { "annotations": { "annotations": { "😀": {"default":[...],"tts":[...]}, ... } } }
+    if (root is Map<String, dynamic>) {
+      if (root.containsKey('annotations')) {
+        final ann1 = root['annotations'];
+        if (ann1 is Map && ann1['annotations'] is Map) {
+          final ann2 = ann1['annotations'] as Map;
+          final out = <String, List<String>>{};
+          for (final entry in ann2.entries) {
+            final key = entry.key?.toString() ?? '';
+            final v = entry.value;
+            final buf = <String>[];
+            if (v is Map) {
+              final def = v['default'];
+              final tts = v['tts'];
+              if (def is List) buf.addAll(def.map((e) => e.toString()));
+              if (tts is List) buf.addAll(tts.map((e) => e.toString()));
+              if (def is String) buf.add(def);
+              if (tts is String) buf.add(tts);
+            }
+            if (key.isNotEmpty && buf.isNotEmpty) out[key] = buf;
+          }
+          return out;
+        }
+      }
+      final out = <String, List<String>>{};
+      for (final entry in root.entries) {
+        final key = entry.key;
+        final v = entry.value;
+        if (key is! String) continue;
+        if (v is List) {
+          out[key] = v.map((e) => e.toString()).toList(growable: false);
+        } else if (v is String) {
+          out[key] = <String>[v];
+        }
+      }
+      return out;
     }
-
-    setState(() {
-      // emoji_picker_flutter 4.4.0 search is async (Future<List<Emoji>>).
-      _searchFuture = _searchEmojis(q);
-    });
+    return <String, List<String>>{};
   }
 
-
-  Future<void> _initSearchIndex() async {
+  Future<void> _initIndex() async {
     try {
-      // Load CLDR annotations (keywords) for EN + RU to support emoji search in both languages.
       final enRaw = await rootBundle.loadString('assets/emoji/annotations_en.json');
       final ruRaw = await rootBundle.loadString('assets/emoji/annotations_ru.json');
 
-      final enJson = jsonDecode(enRaw) as Map<String, dynamic>;
-      final ruJson = jsonDecode(ruRaw) as Map<String, dynamic>;
+      final enAnn = _extractAnnMap(jsonDecode(enRaw));
+      final ruAnn = _extractAnnMap(jsonDecode(ruRaw));
 
-      final enAnn = (enJson['annotations'] as Map<String, dynamic>)['annotations'] as Map<String, dynamic>;
-      final ruAnn = (ruJson['annotations'] as Map<String, dynamic>)['annotations'] as Map<String, dynamic>;
+      _index.clear();
 
-      // Build a compact searchable string per emoji that includes:
-      // - the emoji itself
-      // - EN default/tts
-      // - RU default/tts
-      for (final e in defaultEmojiSet) {
-        final emoji = (e as dynamic).emoji as String;
-        final buf = <String>[];
-
-        void addFrom(Map<String, dynamic> src) {
-          Map? v;
-          // CLDR keys sometimes omit variation selectors (FE0F/FE0E) or include/omit skin-tone modifiers.
-          // Try a few normalized variants to improve match rate (RU search relies heavily on this).
-          final base = _stripEmojiMods(emoji);
-          final variants = <String>{
-            emoji,
-            emoji.replaceAll('\uFE0F', '').replaceAll('\uFE0E', ''),
-            base,
-            base.replaceAll('\uFE0F', '').replaceAll('\uFE0E', ''),
-          };
-          for (final key in variants) {
-            final vv = src[key];
-            if (vv is Map) { v = vv; break; }
-          }
-          if (v != null) {
-            final def = v['default'];
-            final tts = v['tts'];
-            if (def is List) buf.addAll(def.cast<String>());
-            if (tts is List) buf.addAll(tts.cast<String>());
+      void addFrom(Map<String, List<String>> src, String emoji, List<String> buf) {
+        final base = _baseEmoji(emoji);
+        final variants = <String>{
+          emoji,
+          emoji.replaceAll('\uFE0F', '').replaceAll('\uFE0E', ''),
+          base,
+          base.replaceAll('\uFE0F', '').replaceAll('\uFE0E', ''),
+        };
+        for (final key in variants) {
+          final list = src[key];
+          if (list != null && list.isNotEmpty) {
+            buf.addAll(list);
+            break;
           }
         }
-
-        addFrom(enAnn);
-        addFrom(ruAnn);
-
-        final joined = _normalizeAndStem(buf.join(' '));
-        _emojiSearchIndex[emoji] = joined;
       }
 
-      if (mounted) {
-        setState(() {
-          _searchIndexReady = true;
-        });
+      // In emoji_picker_flutter 4.4.0 defaultEmojiSet is List<CategoryEmoji>
+      for (final cat in defaultEmojiSet) {
+        for (final e in cat.emoji) {
+          final buf = <String>[];
+          addFrom(enAnn, e.emoji, buf);
+          addFrom(ruAnn, e.emoji, buf);
+          buf.add(e.name); // keep package english name too
+
+          final norm = _norm(buf.join(' '));
+          if (norm.isNotEmpty) {
+            _index[_baseEmoji(e.emoji)] = norm;
+          }
+        }
       }
-    } catch (_) {
-      // If assets are missing or parsing fails, fallback to the package search.
-      if (mounted) {
-        setState(() {
-          _searchIndexReady = false;
-        });
+
+      if (!mounted) return;
+      setState(() {
+        _indexReady = true;
+        _indexErr = null;
+        _enCount = enAnn.length;
+        _ruCount = ruAnn.length;
+      });
+    } catch (e) {
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('Emoji index init failed: $e');
       }
+      if (!mounted) return;
+      setState(() {
+        _indexReady = false;
+        _indexErr = e.toString();
+        _enCount = 0;
+        _ruCount = 0;
+      });
     }
   }
 
-  
-  String _stemRu(String w) {
-    // very lightweight Russian stemming for emoji search (good enough for plural/cases)
-    var s = w;
-    const suffixes = [
-      'иями','ями','ами','его','ого','ему','ому','ыми','ими','ее','ие','ые','ое',
-      'ий','ый','ая','яя','ое','ее','ов','ев','ом','ем','ах','ях','ам','ям','ою','ею',
-      'а','я','ы','и','е','у','ю','о','ь'
-    ];
-    for (final suf in suffixes) {
-      if (s.length > suf.length + 2 && s.endsWith(suf)) {
-        s = s.substring(0, s.length - suf.length);
-        break;
-      }
-    }
-    return s;
-  }
+  List<String> _categoriesOrder() =>
+      defaultEmojiSet.map((c) => c.category.name).toList(growable: false);
 
-  String _stemEn(String w) {
-    var s = w;
-    const suffixes = ['ing','ed','es','s'];
-    for (final suf in suffixes) {
-      if (s.length > suf.length + 2 && s.endsWith(suf)) {
-        s = s.substring(0, s.length - suf.length);
-        break;
-      }
-    }
-    return s;
-  }
-
-  String _normalizeAndStem(String s) {
-    final norm = _normalizeForSearch(s);
-    if (norm.isEmpty) return '';
-    final parts = norm.split(' ').where((p) => p.isNotEmpty);
-    final out = <String>[];
-    for (final p in parts) {
-      // keep both original token and stems for better matching
-      out.add(p);
-      final hasCyr = RegExp(r'[а-я]', unicode: true).hasMatch(p);
-      out.add(hasCyr ? _stemRu(p) : _stemEn(p));
-    }
-    return out.where((e) => e.isNotEmpty).join(' ');
-  }
-
-String _normalizeForSearch(String s) {
-    final lower = s.toLowerCase().replaceAll('ё', 'е');
-    // keep letters/numbers/spaces; replace everything else with spaces
-    return lower.replaceAll(RegExp(r'[^a-z0-9а-я\s]+', unicode: true), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
-  }
-
-  Future<List<Emoji>> _searchEmojis(String query) async {
-    final qNorm = _normalizeForSearch(query);
-    if (qNorm.isEmpty) return <Emoji>[];
-
-    // If index isn't ready, fallback to emoji_picker_flutter search.
-    if (!_searchIndexReady) {
-      return EmojiPickerUtils().searchEmoji(query, defaultEmojiSet);
-    }
-
-    final tokensRaw = qNorm.split(' ').where((t) => t.isNotEmpty).toList(growable: false);
-    if (tokensRaw.isEmpty) return <Emoji>[];
-
-    // Add stems to query tokens as well.
-    final tokens = <String>[];
-    for (final t in tokensRaw) {
-      tokens.add(t);
-      final hasCyr = RegExp(r'[а-я]', unicode: true).hasMatch(t);
-      tokens.add(hasCyr ? _stemRu(t) : _stemEn(t));
-    }
-    final uniqTokens = tokens.where((e) => e.isNotEmpty).toSet().toList(growable: false);
-
-    // Score emojis by number of matched tokens (OR matching) and return best first.
-    final scored = <Emoji, int>{};
-    for (final e in defaultEmojiSet) {
-      final emoji = (e as dynamic).emoji as String;
-      final hay = _emojiSearchIndex[emoji] ?? '';
-      int score = 0;
-      for (final t in uniqTokens) {
-        if (t.length < 2) continue;
-        if (hay.contains(t)) score++;
-      }
-      if (score > 0) scored[e as Emoji] = score;
-    }
-
-    final list = scored.keys.toList(growable: false);
-    list.sort((a, b) => (scored[b] ?? 0).compareTo(scored[a] ?? 0));
-    return list;
-  }
-
-  void _onScroll() {
-    if (!mounted) return;
-    if (_searchCtrl.text.trim().isNotEmpty) return; // during search, no active section tracking
-
-    Category? best;
-    double bestDy = double.infinity;
-
-    for (final entry in _sectionKeys.entries) {
-      final kCtx = entry.value.currentContext;
-      if (kCtx == null) continue;
-      final box = kCtx.findRenderObject();
-      if (box is! RenderBox) continue;
-
-      final pos = box.localToGlobal(Offset.zero);
-      final dy = pos.dy.abs();
-
-      if (dy < bestDy) {
-        bestDy = dy;
-        best = entry.key;
-      }
-    }
-
-    if (best != null && best != _activeCategory) {
-      setState(() => _activeCategory = best!);
+  String _titleFor(String name) {
+    final n = name.trim().toUpperCase();
+    switch (n) {
+      case 'SMILEYS':
+      case 'SMILEY':
+      case 'PEOPLE':
+        return 'Улыбки';
+      case 'ANIMALS':
+      case 'NATURE':
+        return 'Животные';
+      case 'FOODS':
+      case 'FOOD':
+        return 'Еда';
+      case 'ACTIVITIES':
+      case 'ACTIVITY':
+        return 'Активность';
+      case 'PLACES':
+      case 'TRAVEL':
+        return 'Места';
+      case 'OBJECTS':
+        return 'Предметы';
+      case 'SYMBOLS':
+        return 'Символы';
+      case 'FLAGS':
+        return 'Флаги';
+      default:
+        // Try to show something readable.
+        if (n.isEmpty) return '';
+        return n[0] + n.substring(1).toLowerCase();
     }
   }
 
-  void _jumpTo(Category c) {
-    final key = _sectionKeys[c];
-    final ctx = key?.currentContext;
-    if (ctx == null) return;
-
-    // Leave search mode when jumping.
-    if (_searchCtrl.text.isNotEmpty) {
-      _searchCtrl.clear();
-      FocusScope.of(context).unfocus();
-    }
-
-    setState(() => _activeCategory = c);
-    Scrollable.ensureVisible(
-      ctx,
-      duration: const Duration(milliseconds: 180),
-      curve: Curves.easeOut,
-      alignment: 0.02,
-    );
   }
 
-  void _selectEmoji(Emoji e) {
+  IconData _iconFor(String name) {
+    switch (name) {
+      case 'SMILEYS':
+        return Icons.emoji_emotions_outlined;
+      case 'ANIMALS':
+        return Icons.pets_outlined;
+      case 'FOODS':
+        return Icons.restaurant_outlined;
+      case 'ACTIVITIES':
+        return Icons.sports_basketball_outlined;
+      case 'TRAVEL':
+        return Icons.directions_car_outlined;
+      case 'OBJECTS':
+        return Icons.lightbulb_outline;
+      case 'SYMBOLS':
+        return Icons.alternate_email;
+      case 'FLAGS':
+        return Icons.flag_outlined;
+      default:
+        return Icons.circle_outlined;
+    }
+  }
+
+  void _pick(Emoji e) {
     widget.onEmojiSelected(e);
-
     setState(() {
       _recents.removeWhere((x) => x.emoji == e.emoji);
       _recents.insert(0, e);
@@ -323,278 +268,334 @@ String _normalizeForSearch(String s) {
     });
   }
 
-  // --- Category helpers (safe for 4.4.0) ---
+  Future<List<Emoji>> _search(String q) async {
+    final query = _norm(q);
+    if (query.isEmpty) return const <Emoji>[];
+    if (!_indexReady) return const <Emoji>[]; // no fallback
 
-  List<Category> _categoryOrder() {
-    final res = <Category>[Category.RECENT];
-    for (final item in defaultEmojiSet) {
-      final c = (item as dynamic).category as Category;
-      if (!res.contains(c)) res.add(c);
+    final terms = query.split(' ').where((x) => x.isNotEmpty).toList(growable: false);
+    if (terms.isEmpty) return const <Emoji>[];
+
+    final res = <Emoji>[];
+    for (final cat in defaultEmojiSet) {
+      for (final e in cat.emoji) {
+        final key = _baseEmoji(e.emoji);
+        final hay = _index[key] ?? '';
+        if (hay.isEmpty) continue;
+        bool ok = true;
+        for (final t in terms) {
+          if (!hay.contains(t)) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) res.add(e);
+      }
     }
     return res;
   }
 
-  List<Emoji> _emojisForDefaultItem(dynamic item) {
-    // Different versions of emoji_picker_flutter used different field names.
-    // We keep it runtime-safe.
-    try {
-      final v = item.emojis;
-      if (v is List<Emoji>) return v;
-    } catch (_) {}
-    try {
-      final v = item.emoji;
-      if (v is List<Emoji>) return v;
-    } catch (_) {}
-    try {
-      final v = item.emojiList;
-      if (v is List<Emoji>) return v;
-    } catch (_) {}
-    return const <Emoji>[];
-  }
-
-  String _titleFor(Category c) {
-    switch (c) {
-      case Category.RECENT:
-        return 'Недавние';
-      case Category.SMILEYS:
-        return 'Смайлики и люди';
-      case Category.ANIMALS:
-        return 'Животные и природа';
-      case Category.FOODS:
-        return 'Еда и напитки';
-      case Category.ACTIVITIES:
-        return 'Активности';
-      case Category.TRAVEL:
-        return 'Путешествия';
-      case Category.OBJECTS:
-        return 'Объекты';
-      case Category.SYMBOLS:
-        return 'Символы';
-      case Category.FLAGS:
-        return 'Флаги';
-      default:
-        return c.toString();
-    }
-  }
-
-  IconData _iconForCategory(Category c) {
-    switch (c) {
-      case Category.RECENT:
-        return Icons.access_time;
-      case Category.SMILEYS:
-        return Icons.emoji_emotions_outlined;
-      case Category.ANIMALS:
-        return Icons.pets_outlined;
-      case Category.FOODS:
-        return Icons.restaurant_menu;
-      case Category.ACTIVITIES:
-        return Icons.sports_esports;
-      case Category.TRAVEL:
-        return Icons.directions_car;
-      case Category.OBJECTS:
-        return Icons.lightbulb_outline;
-      case Category.SYMBOLS:
-        return Icons.emoji_symbols;
-      case Category.FLAGS:
-        return Icons.flag_outlined;
-      default:
-        return Icons.emoji_emotions_outlined;
-    }
-  }
-
-  // --- UI blocks ---
-
-  Widget _sectionHeader(String title, Color onSurface) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
-      child: Text(
-        title,
-        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              color: onSurface,
-              fontWeight: FontWeight.w600,
-            ),
-      ),
-    );
-  }
-
-  SliverGrid _emojiGrid(List<Emoji> emojis, Color surface) {
-    return SliverGrid(
-      delegate: SliverChildBuilderDelegate(
-        (context, i) {
-          final e = emojis[i];
-          return InkWell(
-            onTap: () => _selectEmoji(e),
-            borderRadius: BorderRadius.circular(10),
-            child: Center(
-              child: Text(
-                e.emoji,
-                style: widget.emojiTextStyle ?? const TextStyle(fontSize: _emojiSize),
-              ),
-            ),
-          );
-        },
-        childCount: emojis.length,
-      ),
+  Widget _emojiGrid(List<Emoji> emojis) {
+    return GridView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: emojis.length,
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: _columns,
         crossAxisSpacing: _hSpace,
         mainAxisSpacing: _vSpace,
       ),
-    );
-  }
-
-  Widget _buildSearchBar(Color surface, Color onSurface) {
-    return Material(
-      color: surface,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-        child: Row(
-          children: [
-            if (!_searchMode)
-              IconButton(
-                icon: Icon(Icons.search, color: onSurface),
-                tooltip: widget.searchHint,
-                onPressed: () {
-                  setState(() => _searchMode = true);
-                  // focus after rebuild
-                  Future.microtask(() => _searchFocus.requestFocus());
-                },
-              )
-            else ...[
-              IconButton(
-                icon: Icon(Icons.arrow_back, color: onSurface),
-                onPressed: () {
-                  _searchCtrl.clear();
-                  _searchFocus.unfocus();
-                  setState(() => _searchMode = false);
-                },
-              ),
-              Expanded(
-                child: TextField(
-                  controller: _searchCtrl,
-                  focusNode: _searchFocus,
-                  decoration: InputDecoration(
-                    hintText: widget.searchHint,
-                    isDense: true,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14),
-                      borderSide: BorderSide(color: Theme.of(context).dividerColor),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _bottomCategories(Color surface, Color onSurface) {
-    final primary = Theme.of(context).colorScheme.primary;
-    final order = _categoryOrder();
-
-    return Material(
-      color: surface,
-      child: SafeArea(
-        top: false,
-        child: SizedBox(
-          height: 44,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              for (final c in order)
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  onPressed: () => _jumpTo(c),
-                  icon: Icon(
-                    _iconForCategory(c),
-                    size: 22,
-                    color: (c == _activeCategory && _searchCtrl.text.isEmpty) ? primary : onSurface,
-                  ),
-                ),
-            ],
+      itemBuilder: (context, i) {
+        final e = emojis[i];
+        return InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => _pick(e),
+          child: Center(
+            child: Text(
+              e.emoji,
+              style: widget.emojiTextStyle ?? const TextStyle(fontSize: _emojiFontSize),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
+  Widget _recentsBlock(Color onSurface) {
+    final items = _recents.take(_recentsLimit).toList(growable: true);
+    if (items.isEmpty) {
+      // show first row from default set
+      final flat = defaultEmojiSet.expand((c) => c.emoji);
+      items.addAll(flat.take(_columns));
+    }
 
-  Widget _buildSearchEmpty(Color surface, Color onSurface) {
-    // When search is opened but query is empty: show only the first row of recents.
-    final items = _recents.take(_columns).toList(growable: false);
-    return CustomScrollView(
-      controller: _scroll,
-      slivers: [
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
-            child: Text('Недавние', style: TextStyle(color: onSurface, fontWeight: FontWeight.w600)),
-          ),
+    return Column(
+      key: _sectionKeys.putIfAbsent('__RECENT__', () => GlobalKey()),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 8, 14, 2),
+          child: Text('Часто используемые',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(color: onSurface)),
         ),
-        _emojiGrid(items, surface),
-        const SliverToBoxAdapter(child: SizedBox(height: 12)),
+        _emojiGrid(items),
+        Divider(height: 1, thickness: 1, color: Theme.of(context).dividerColor),
       ],
     );
   }
 
-  Widget _buildSearchResults(Color surface, Color onSurface) {
-    final q = _searchCtrl.text.trim();
-    if (q.isEmpty) return _buildSearchEmpty(surface, onSurface);
+  Widget _normalList(Color onSurface) {
+    final order = _categoriesOrder();
+    for (final name in order) {
+      _sectionKeys.putIfAbsent(name, () => GlobalKey());
+    }
 
-    final future = _searchFuture ?? _searchEmojis(q);
+    final children = <Widget>[];
 
-    return FutureBuilder<List<Emoji>>(
-      future: future,
-      builder: (context, snap) {
-        final data = snap.data ?? const <Emoji>[];
-        return CustomScrollView(
-          controller: _scroll,
-          slivers: [
-            SliverToBoxAdapter(
-              key: _sectionKeys[Category.RECENT],
-              child: _sectionHeader('Результаты', onSurface),
+    for (final name in order) {
+      final cat = defaultEmojiSet.firstWhere((c) => c.category.name == name);
+      children.add(
+        Column(
+          key: _sectionKeys[name],
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 2),
+              child: Text(_titleFor(name),
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(color: onSurface)),
             ),
-            _emojiGrid(data, surface),
-            const SliverToBoxAdapter(child: SizedBox(height: 12)),
+            _emojiGrid(cat.emoji),
+          ],
+        ),
+      );
+    }
+
+    return ListView(controller: _scroll, children: children);
+  }
+
+  Widget _searchResults(Color onSurface) {
+    final q = _searchCtrl.text.trim();
+
+    if (q.isEmpty) {
+      final items = _recents.isEmpty
+          ? defaultEmojiSet.expand((c) => c.emoji).take(_columns).toList()
+          : _recents.take(_columns).toList();
+      return ListView(
+        controller: _scroll,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 8, 14, 2),
+            child: Text('Часто используемые',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(color: onSurface)),
+          ),
+          _emojiGrid(items),
+        ],
+      );
+    }
+
+    final fut = _searchFuture ??= _search(q);
+    return FutureBuilder<List<Emoji>>(
+      future: fut,
+      builder: (context, snap) {
+        final list = snap.data ?? const <Emoji>[];
+        return ListView(
+          controller: _scroll,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 2),
+              child: Text('Результаты',
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(color: onSurface)),
+            ),
+            if (kDebugMode)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                child: Text(
+                  _indexReady
+                      ? 'index en=$_enCount ru=$_ruCount'
+                      : 'index loading...' + (_indexErr != null ? ' err=$_indexErr' : ''),
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            if (snap.connectionState == ConnectionState.waiting)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (list.isEmpty)
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(_indexReady ? 'Ничего не найдено' : 'Индекс не готов',
+                    style: Theme.of(context).textTheme.bodyMedium),
+              )
+            else
+              _emojiGrid(list),
           ],
         );
       },
     );
   }
 
-  Widget _buildNormalList(Color surface, Color onSurface) {
-    final cats = defaultEmojiSet;
+  Future<void> _scrollTo(String name) async {
+    final key = _sectionKeys[name];
+    final ctx = key?.currentContext;
+    if (ctx == null) return;
+    await Scrollable.ensureVisible(ctx,
+        duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
+  }
 
-    return CustomScrollView(
-      controller: _scroll,
-      slivers: [
-        // Recents section
-        SliverToBoxAdapter(
-          key: _sectionKeys[Category.RECENT],
-          child: _sectionHeader(_titleFor(Category.RECENT), onSurface),
-        ),
-        _emojiGrid(_recents, surface),
-        const SliverToBoxAdapter(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(14, 10, 14, 0),
-            child: Divider(height: 14),
-          ),
-        ),
-
-        // Categories sequentially
-        for (final item in cats) ...[
-          SliverToBoxAdapter(
-            key: _sectionKeys[(item as dynamic).category as Category],
-            child: _sectionHeader(_titleFor((item as dynamic).category as Category), onSurface),
-          ),
-          _emojiGrid(_emojisForDefaultItem(item), surface),
-          const SliverToBoxAdapter(child: SizedBox(height: 10)),
+  Widget _bottomCategories(Color surface, Color primary) {
+    final order = _categoriesOrder();
+    return Container(
+      height: 44,
+      decoration: BoxDecoration(
+        color: surface,
+        border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
+      ),
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        children: [
+          for (final name in order)
+            IconButton(
+              tooltip: _titleFor(name),
+              onPressed: () => _scrollTo(name),
+              icon: Icon(_iconFor(name), color: primary),
+            ),
         ],
+      ),
+    );
+  }
 
-        const SliverToBoxAdapter(child: SizedBox(height: 12)),
+  Widget _topRow(Color surface) {
+    if (!_searchMode) {
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final all = _all;
+          final recents = (_recents.isNotEmpty ? _recents : all).take(16).toList(growable: false);
+          final perRow = ((constraints.maxWidth - 48) / 36).floor().clamp(6, 8);
+          List<Widget> buildRow(int start) {
+            final end = (start + perRow).clamp(0, recents.length);
+            final items = recents.sublist(start, end);
+            return items
+                .map((e) => Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () => _selectEmoji(e),
+                        child: SizedBox(
+                          width: 32,
+                          height: 32,
+                          child: Center(
+                            child: Text(
+                              e.emoji,
+                              style: const TextStyle(fontSize: 22),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ))
+                .toList();
+          }
+
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              IconButton(
+                tooltip: widget.searchHint,
+                icon: const Icon(Icons.search),
+                onPressed: () {
+                  setState(() => _searchMode = true);
+                  Future.microtask(() => _searchFocus.requestFocus());
+                },
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(children: buildRow(0)),
+                      if (recents.length > perRow) Wrap(children: buildRow(perRow)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    }
+
+    // Search mode.
+    return Row(
+      children: [
+        IconButton(
+          tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () {
+            setState(() {
+              _searchMode = false;
+              _query = '';
+              _filtered = const [];
+            });
+            FocusScope.of(context).unfocus();
+          },
+        ),
+        Expanded(
+          child: TextField(
+            controller: _searchCtrl,
+            focusNode: _searchFocus,
+            decoration: InputDecoration(
+              hintText: widget.searchHint,
+              border: InputBorder.none,
+            ),
+            onChanged: _onQueryChanged,
+          ),
+        ),
+        if (_query.isNotEmpty)
+          IconButton(
+            tooltip: 'Очистить',
+            icon: const Icon(Icons.close),
+            onPressed: () {
+              _searchCtrl.clear();
+              _onQueryChanged('');
+              _searchFocus.requestFocus();
+            },
+          ),
+      ],
+    );
+  }
+
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+          child: TextField(
+            controller: _searchCtrl,
+            focusNode: _searchFocus,
+            decoration: InputDecoration(
+              hintText: widget.searchHint,
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(999)),
+            ),
+          ),
+        ),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton(
+            onPressed: () {
+              _searchCtrl.clear();
+              _searchFocus.unfocus();
+              setState(() => _searchMode = false);
+            },
+            child: const Text('Закрыть поиск'),
+          ),
+        ),
       ],
     );
   }
@@ -603,26 +604,14 @@ String _normalizeForSearch(String s) {
   Widget build(BuildContext context) {
     final surface = Theme.of(context).colorScheme.surface;
     final onSurface = Theme.of(context).colorScheme.onSurfaceVariant;
+    final primary = Theme.of(context).colorScheme.primary;
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Ensure we have a bounded height; otherwise scrolling won't work.
-        final maxH = constraints.maxHeight.isFinite ? constraints.maxHeight : 360.0;
-        final h = math.max(280.0, maxH);
-
-        return SizedBox(
-          height: h,
-          child: Column(
-            children: [
-              _buildSearchBar(surface, onSurface),
-              Expanded(
-                child: _searchMode ? _buildSearchResults(surface, onSurface) : _buildNormalList(surface, onSurface),
-              ),
-              if (!_searchMode) _bottomCategories(surface, onSurface),
-            ],
-          ),
-        );
-      },
+    return Column(
+      children: [
+        Container(color: surface, padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2), child: _topRow(surface)),
+        Expanded(child: _searchMode ? _searchResults(onSurface) : _normalList(onSurface)),
+        if (!_searchMode) _bottomCategories(surface, primary),
+      ],
     );
   }
 }

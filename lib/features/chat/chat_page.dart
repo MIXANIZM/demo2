@@ -806,8 +806,11 @@ Widget build(BuildContext context) {
 
     return WillPopScope(
       onWillPop: () async {
-        if (_isEmojiOpen) {
-          setState(() => _isEmojiOpen = false);
+        if (_isEmojiOpen || _showEmojiKeyboard) {
+          setState(() {
+            _isEmojiOpen = false;
+            _showEmojiKeyboard = false;
+          });
           _focusNode.requestFocus();
           return false;
         }
