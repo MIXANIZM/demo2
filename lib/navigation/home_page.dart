@@ -2,11 +2,11 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 
 import '../features/inbox/inbox_page.dart';
 import '../features/contact/contact_page.dart';
+import '../features/chat/chat_page.dart';
 import '../features/profile/profile_page.dart';
 import '../features/structure/structure_page.dart';
 import '../features/tasks/tasks_page.dart';
@@ -18,15 +18,16 @@ import '../shared/incoming_gateway.dart';
 import '../shared/message_source.dart';
 import '../shared/phone_utils.dart';
 import '../shared/source_settings_store.dart';
+import '../providers/stores_providers.dart';
 
-class HomeShell extends ConsumerStatefulWidget {
+class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
   @override
-  ConsumerState<HomeShell> createState() => _HomeShellState();
+  State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends ConsumerState<HomeShell> {
+class _HomeShellState extends State<HomeShell> {
   int _currentIndex = 0;
 
   MessageSource _selectedSource = MessageSource.all;
@@ -253,7 +254,7 @@ class _HomeShellState extends ConsumerState<HomeShell> {
     final contactStore = ref.read(contactStoreProvider);
     final conversationStore = ref.read(conversationStoreProvider);
     final contact = await contactStore.getOrCreateForIncoming(
-      source: ChannelSource.telegram,
+      source: MessageSource.telegram,
       handle: phone,
       displayName: phone,
     );
@@ -264,7 +265,7 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       MaterialPageRoute(
         builder: (_) => ChatPage(
           contactId: contact.id,
-          channelSource: ChannelSource.telegram,
+      channelSource: MessageSource.telegram,
           handle: phone,
           conversationId: convoId,
         ),
