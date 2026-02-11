@@ -41,6 +41,11 @@ class ChatPage extends ConsumerStatefulWidget {
   ConsumerState<ChatPage> createState() => _ChatPageState();
 }
 
+
+
+enum _ChatMenuAction {
+  linkToContact,
+}
 class _ChatPageState extends ConsumerState<ChatPage> {
   // Local/optimistic map of MY reactions per message (supports Telegram Premium-style up to 3)
   final Map<String, List<String>> _myReactionsByMessageId = {};
@@ -108,6 +113,50 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   String? _effectiveConversationId;
   bool _loading = true;
 
+  Future<void> _openLinkToContactSheet() async {
+    if (widget.conversationId == null) return;
+    if (widget.channelSource != MessageSource.matrix) return;
+
+    // Matrix room ids are typically like '!....:server'
+    final isRoomId = widget.channelHandle.startsWith('!');
+    if (!isRoomId) return;
+
+    final selectedContactId = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (ctx) {
+        return _ContactPickerSheet(
+          initialSelectedId: widget.contactId,
+        );
+      },
+    );
+
+    if (!mounted) return;
+    if (selectedContactId == null || selectedContactId.isEmpty) return;
+    if (selectedContactId == widget.contactId) return;
+
+    final convStore = ref.read(conversationStoreProvider);
+    await convStore.linkConversationToContact(
+      widget.conversationId!,
+      selectedContactId,
+      alsoUpsertChannel: true,
+    );
+
+    if (!mounted) return;
+
+    // Re-open chat with the new bound contact.
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => ChatPage(
+          conversationId: widget.conversationId,
+          contactId: selectedContactId,
+          channelSource: widget.channelSource,
+          channelHandle: widget.channelHandle,
+        ),
+      ),
+    );
+  }
   @override
   void initState() {
     super.initState();
@@ -966,13 +1015,34 @@ Widget build(BuildContext context) {
                 ],
               ),
             ),
-              actions: const [
-                Icon(Icons.videocam_outlined),
-                SizedBox(width: 10),
-                Icon(Icons.call_outlined),
-                SizedBox(width: 10),
-                Icon(Icons.more_vert),
-                SizedBox(width: 6),
+              actions: [
+                const Icon(Icons.videocam_outlined),
+                const SizedBox(width: 10),
+                const Icon(Icons.call_outlined),
+                const SizedBox(width: 10),
+                PopupMenuButton<_ChatMenuAction>(
+                  icon: const Icon(Icons.more_vert),
+                  onSelected: (a) {
+                    switch (a) {
+                      case _ChatMenuAction.linkToContact:
+                        _openLinkToContactSheet();
+                        break;
+                    }
+                  },
+                  itemBuilder: (context) {
+                    final canLink = widget.conversationId != null &&
+                        widget.channelSource == MessageSource.matrix &&
+                        widget.channelHandle.startsWith('!');
+                    return [
+                      PopupMenuItem<_ChatMenuAction>(
+                        value: _ChatMenuAction.linkToContact,
+                        enabled: canLink,
+                        child: const Text('Привязать к контакту'),
+                      ),
+                    ];
+                  },
+                ),
+                const SizedBox(width: 6),
               ],
             ),
         body: Column(
@@ -2198,6 +2268,113 @@ class _EmojiPickerSheetState extends State<_EmojiPickerSheet> {
           ),
         ),
       ],
+    );
+  }
+}
+
+// --------------------
+// Contact picker sheet
+// --------------------
+class _ContactPickerSheet extends ConsumerStatefulWidget {
+  const _ContactPickerSheet({required this.initialSelectedId});
+
+  final String initialSelectedId;
+
+  @override
+  ConsumerState<_ContactPickerSheet> createState() => _ContactPickerSheetState();
+}
+
+class _ContactPickerSheetState extends ConsumerState<_ContactPickerSheet> {
+  final TextEditingController _search = TextEditingController();
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Trigger rebuilds when the in-memory contact store changes.
+    ref.watch(contactsVersionProvider);
+
+    final store = ref.read(contactStoreProvider);
+    final q = _search.text.trim().toLowerCase();
+
+    final contacts = store.all
+      ..sort((a, b) => a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase()));
+
+    final filtered = q.isEmpty
+        ? contacts
+        : contacts.where((c) {
+            final dn = c.displayName.toLowerCase();
+            final fn = (c.firstName ?? '').toLowerCase();
+            final ln = (c.lastName ?? '').toLowerCase();
+            final comp = (c.company ?? '').toLowerCase();
+            return dn.contains(q) || fn.contains(q) || ln.contains(q) || comp.contains(q);
+          }).toList(growable: false);
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: SizedBox(
+          height: MediaQuery.of(context).size.height * 0.75,
+          child: Column(
+            children: [
+              const SizedBox(height: 8),
+              const Text(
+                'Привязать к контакту',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: TextField(
+                  controller: _search,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    prefixIcon: Icon(Icons.search),
+                    hintText: 'Поиск контакта',
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: ListView.separated(
+                  itemCount: filtered.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (ctx, i) {
+                    final c = filtered[i];
+                    final selected = c.id == widget.initialSelectedId;
+                    return ListTile(
+                      title: Text(c.displayName.isNotEmpty ? c.displayName : 'Без имени'),
+                      subtitle: (c.company != null && c.company!.trim().isNotEmpty)
+                          ? Text(c.company!.trim())
+                          : null,
+                      trailing: selected ? const Icon(Icons.check) : null,
+                      onTap: () => Navigator.of(context).pop(c.id),
+                    );
+                  },
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Отмена'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
