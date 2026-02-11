@@ -130,7 +130,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
 
   void _scrollToBottomSoon() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return null;
+      if (!mounted) return;
       if (!_scroll.hasClients) return;
       // Keep bottom visible when keyboard/panels change.
       _scroll.animateTo(
@@ -271,7 +271,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         contactId: widget.contactId,
         conversationId: id,
       );
-      if (!mounted) return null;
+      if (!mounted) return;
       setState(() {
         _messages
           ..clear()
@@ -293,7 +293,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       });
       _scrollToBottom();
     } else {
-      if (!mounted) return null;
+      if (!mounted) return;
       setState(() => _loading = false);
     }
   }
@@ -320,26 +320,26 @@ class _ChatPageState extends ConsumerState<ChatPage> {
 
       final timeline = await room.getTimeline(
         onUpdate: () {
-          if (!mounted) return null;
+          if (!mounted) return;
           _syncUiFromMatrixTimeline();
         },
         onInsert: (_) {
-          if (!mounted) return null;
+          if (!mounted) return;
           _syncUiFromMatrixTimeline(newMessageLikely: true);
         },
         onRemove: (_) {
-          if (!mounted) return null;
+          if (!mounted) return;
           _syncUiFromMatrixTimeline();
         },
         onChange: (_) {
-          if (!mounted) return null;
+          if (!mounted) return;
           _syncUiFromMatrixTimeline();
         },
       );
 
       _mxTimeline = timeline;
       _syncUiFromMatrixTimeline();
-      if (!mounted) return null;
+      if (!mounted) return;
       setState(() {
         _loading = false;
         _isAtBottom = true;
@@ -347,7 +347,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       });
       _scrollToBottom();
     } catch (e) {
-      if (!mounted) return null;
+      if (!mounted) return;
       setState(() {
         _messages
           ..clear()
@@ -405,7 +405,7 @@ Future<String?> _mxSendReaction({required String targetEventId, required String 
 
   Future<void> _mxRedactReaction({required String reactionEventId}) async {
     final client = MatrixService.instance.client;
-    if (client == null || !client.isLogged()) return null;
+    if (client == null || !client.isLogged()) return;
 
     final roomId = widget.channelHandle;
     try {
@@ -418,7 +418,7 @@ Future<String?> _mxSendReaction({required String targetEventId, required String 
 
 Future<void> _mxEditMessage({required String targetEventId, required String newText}) async {
   final client = MatrixService.instance.client;
-  if (client == null || !client.isLogged()) return null;
+  if (client == null || !client.isLogged()) return;
 
   final roomId = widget.channelHandle;
 
@@ -442,7 +442,7 @@ Future<void> _mxEditMessage({required String targetEventId, required String newT
     // Roll back optimistic state if sending failed.
     _mxPendingEditTextByTarget.remove(targetEventId);
     if (mounted) setState(() {});
-    if (!mounted) return null;
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Edit send failed: $e')),
     );
@@ -454,7 +454,7 @@ Future<void> _mxEditMessage({required String targetEventId, required String newT
 
 Future<void> _mxRedactMessage({required String targetEventId}) async {
   final client = MatrixService.instance.client;
-  if (client == null || !client.isLogged()) return null;
+  if (client == null || !client.isLogged()) return;
 
   final roomId = widget.channelHandle;
 
@@ -468,7 +468,7 @@ Future<void> _mxRedactMessage({required String targetEventId}) async {
   } catch (e) {
     _mxPendingRedactions.remove(targetEventId);
     if (mounted) setState(() {});
-    if (!mounted) return null;
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Delete failed: $e')),
     );
@@ -957,7 +957,7 @@ Widget build(BuildContext context) {
                                       } catch (_) {
                                         // ignore
                                       }
-                                      if (!mounted) return null;
+                                      if (!mounted) return;
                                       setState(() => _mxLoadingHistory = false);
                                       _syncUiFromMatrixTimeline();
                                     },

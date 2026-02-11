@@ -232,7 +232,6 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
     }
   }
 
-  }
 
   IconData _iconFor(String name) {
     switch (name) {

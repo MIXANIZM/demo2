@@ -142,10 +142,7 @@ class _HomeShellState extends State<HomeShell> {
           Navigator.of(context).maybePop(); // здесь ОС закроет приложение
         }
       },
-      child: WillPopScope(
-        onWillPop: _handleBack,
-        child: app,
-      ),
+      child: app,
     );
   }
 
