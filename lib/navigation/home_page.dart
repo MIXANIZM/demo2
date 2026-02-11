@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 
 import '../features/inbox/inbox_page.dart';
@@ -18,14 +19,14 @@ import '../shared/message_source.dart';
 import '../shared/phone_utils.dart';
 import '../shared/source_settings_store.dart';
 
-class HomeShell extends StatefulWidget {
+class HomeShell extends ConsumerStatefulWidget {
   const HomeShell({super.key});
 
   @override
-  State<HomeShell> createState() => _HomeShellState();
+  ConsumerState<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends ConsumerState<HomeShell> {
   int _currentIndex = 0;
 
   MessageSource _selectedSource = MessageSource.all;
@@ -156,11 +157,119 @@ class _HomeShellState extends State<HomeShell> {
       );
     }
     if (_currentIndex == 0) {
-      // Входящие: симулятор отключён (только реальные источники).
-      return null;
+      // Входящие: быстрый старт чата по номеру телефона (Telegram).
+      return FloatingActionButton(
+        onPressed: _openStartChatByPhone,
+        tooltip: 'Написать по номеру',
+        child: const Icon(Icons.phone),
+      );
     }
 
     return null;
+  }
+
+  Future<void> _openStartChatByPhone() async {
+    FocusScope.of(context).unfocus();
+    final clip = await Clipboard.getData('text/plain');
+    final clipText = (clip?.text ?? '').trim();
+    final suggested = PhoneUtils.normalizeRuPhone(clipText);
+
+    final ctrl = TextEditingController(text: suggested ?? '');
+    final res = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final bottom = MediaQuery.of(ctx).viewInsets.bottom;
+        return Padding(
+          padding: EdgeInsets.only(left: 16, right: 16, top: 16, bottom: bottom + 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.phone),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Написать по номеру',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.of(ctx).pop(null),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: ctrl,
+                autofocus: suggested == null,
+                keyboardType: TextInputType.phone,
+                decoration: InputDecoration(
+                  labelText: 'Номер телефона',
+                  hintText: '+7 999 123-45-67',
+                  suffixIcon: suggested != null && ctrl.text.isEmpty
+                      ? IconButton(
+                          icon: const Icon(Icons.content_paste),
+                          onPressed: () {
+                            ctrl.text = suggested;
+                            ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
+                          },
+                        )
+                      : null,
+                ),
+              ),
+              if (suggested != null && suggested.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'Из буфера: $suggested',
+                    style: TextStyle(color: Theme.of(ctx).hintColor),
+                  ),
+                ),
+              const SizedBox(height: 12),
+              ElevatedButton.icon(
+                onPressed: () {
+                  final normalized = PhoneUtils.normalizeRuPhone(ctrl.text.trim());
+                  if (normalized == null) return;
+                  Navigator.of(ctx).pop(normalized);
+                },
+                icon: const Icon(Icons.send),
+                label: const Text('Открыть чат'),
+              ),
+              const SizedBox(height: 6),
+            ],
+          ),
+        );
+      },
+    );
+
+    final phone = res;
+    if (phone == null || phone.isEmpty || !mounted) return;
+
+    // Создаём/находим контакт и диалог для Telegram по "handle=phone".
+    final contactStore = ref.read(contactStoreProvider);
+    final conversationStore = ref.read(conversationStoreProvider);
+    final contact = await contactStore.getOrCreateForIncoming(
+      source: ChannelSource.telegram,
+      handle: phone,
+      displayName: phone,
+    );
+    final convoId = await conversationStore.ensureConversationForContact(contact.id);
+
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ChatPage(
+          contactId: contact.id,
+          channelSource: ChannelSource.telegram,
+          handle: phone,
+          conversationId: convoId,
+        ),
+      ),
+    );
   }
 
   Future<void> _openQuickAddContact() async {

@@ -704,11 +704,30 @@ if (local != null) {
 
     // Track whether we should show the "new messages" jump button.
     final prevCount = _messages.length;
+
+    // If we're loading older history while the user is reading somewhere in the middle,
+    // we must keep their viewport stable (no jump to top).
+    final shouldPreserveScroll =
+        _scroll.hasClients && !_isAtBottom && (_mxLoadingHistory || _autoLoadingFullHistory);
+    final double oldMaxExtent = shouldPreserveScroll ? _scroll.position.maxScrollExtent : 0;
+    final double oldOffset = shouldPreserveScroll ? _scroll.offset : 0;
+
     setState(() {
       _messages
         ..clear()
         ..addAll(ui);
     });
+
+    if (shouldPreserveScroll) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scroll.hasClients) return;
+        final newMax = _scroll.position.maxScrollExtent;
+        final delta = newMax - oldMaxExtent;
+        // Keep the same content in view by pushing the offset down by the amount of prepended content.
+        final target = (oldOffset + delta).clamp(0.0, newMax);
+        _scroll.jumpTo(target);
+      });
+    }
 
     if (newMessageLikely && ui.length > prevCount) {
       _maybeAutoScroll(force: false);
@@ -1073,8 +1092,9 @@ Widget build(BuildContext context) {
                       ),
                     ),
 
-                    // "New messages jump-to-bottom button (only when user is not at bottom)
-                    if (!_isAtBottom && _pendingNewMessages > 0)
+                    // Jump-to-bottom button when user is not at bottom.
+                    // Shows counter only if there are pending unseen new messages.
+                    if (!_isAtBottom)
                       Positioned(
                         right: 14,
                         bottom: 14,
@@ -1086,7 +1106,7 @@ Widget build(BuildContext context) {
                             child: InkWell(
                               borderRadius: BorderRadius.circular(999),
                               onTap: () {
-                                if (mounted) {
+                                if (_pendingNewMessages > 0 && mounted) {
                                   setState(() {
                                     _pendingNewMessages = 0;
                                   });
@@ -1099,7 +1119,7 @@ Widget build(BuildContext context) {
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     const Icon(Icons.arrow_downward, size: 18),
-                                    if (_pendingNewMessages > 1) ...[
+                                    if (_pendingNewMessages > 0) ...[
                                       const SizedBox(width: 6),
                                       Text(
                                         _pendingNewMessages.toString(),
