@@ -10,4 +10,7 @@ class AppSettingsStore {
   /// Если включено — при открытии чата пытаемся подгрузить всю историю автоматически.
   /// По умолчанию выключено, чтобы не тормозить работу.
   final ValueNotifier<bool> autoLoadFullHistory = ValueNotifier<bool>(false);
+  /// Алиас для совместимости с кодом экрана чата.
+  ValueNotifier<bool> get autoLoadFullHistoryOnOpen => autoLoadFullHistory;
+
 }
