@@ -135,23 +135,8 @@ class _InboxPageState extends ConsumerState<InboxPage> {
               FilledButton.icon(
                 onPressed: () {
                   final c = _store.getOrCreateByPhone(phoneInput: normalizedPhone);
-                  // Создаём 2 диалога-заглушки (WhatsApp + Telegram),
-                  // чтобы потом реальные источники «прилипли» к существующей связи.
-                  _conversations.ensureConversation(
-                    source: MessageSource.whatsapp,
-                    handle: normalizedPhone,
-                    contactId: c.id,
-                    lastMessage: 'Контакт создан',
-                  );
-                  _conversations.ensureConversation(
-                    source: MessageSource.telegram,
-                    handle: normalizedPhone,
-                    contactId: c.id,
-                    lastMessage: 'Контакт создан',
-                  );
-
                   if (!mounted) return;
-                                      Navigator.of(context).push(
+                  Navigator.of(context).push(
                     MaterialPageRoute(builder: (_) => ContactPage(contactId: c.id)),
                   );
                 },
@@ -160,7 +145,7 @@ class _InboxPageState extends ConsumerState<InboxPage> {
               ),
               const SizedBox(height: 8),
               const Text(
-                'Каналы WhatsApp/Telegram добавляются без реальной проверки.\nПроверку сделаем при подключении источников.',
+                'Контакт создаётся без создания «фейковых» каналов.\nКанал Telegram/WhatsApp добавим, когда будет реальная привязка источника.',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 12, color: Colors.black54),
               ),

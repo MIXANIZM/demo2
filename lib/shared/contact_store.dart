@@ -122,11 +122,13 @@ class ContactStore {
   /// Создать (или получить существующий) контакт по телефону.
   ///
   /// Важно: телефон приводим к +7XXXXXXXXXX.
-  /// По твоему правилу создаём каналы WhatsApp + Telegram (по умолчанию).
+  /// ВАЖНО: по умолчанию НЕ создаём Telegram-канал.
+  /// Иначе получится "фейковый" Telegram по номеру телефона и сообщения могут уходить
+  /// не туда, потому что реальный идентификатор Telegram-диалога у нас сейчас — Matrix room.
   Contact getOrCreateByPhone({
     required String phoneInput,
     bool addWhatsApp = true,
-    bool addTelegram = true,
+    bool addTelegram = false,
   }) {
     final normalizedPhone = PhoneUtils.normalizeRuPhone(phoneInput);
     if (normalizedPhone.isEmpty) {

@@ -29,7 +29,10 @@ class FullEmojiPicker extends StatefulWidget {
 
 class _FullEmojiPickerState extends State<FullEmojiPicker> {
   static const int _columns = 9;
-  static const int _recentsLimit = 28;
+  // Храним больше, но показываем по UI отдельно.
+  static const int _recentsLimit = 80;
+  static const int _recentsStickyCount = 9;
+  static const int _recentsSectionCount = 27; // 3 ряда по 9
   static const double _hSpace = 6;
   static const double _vSpace = 6;
   static const double _emojiFontSize = 26;
@@ -53,6 +56,11 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
   int _enCount = 0;
   int _ruCount = 0;
   final Map<String, String> _index = <String, String>{};
+
+  /// All emojis flattened from defaultEmojiSet.
+  List<Emoji> get _all =>
+      defaultEmojiSet.expand((cat) => cat.emoji).toList(growable: false);
+
 
   @override
   void initState() {
@@ -234,26 +242,25 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
 
 
   IconData _iconFor(String name) {
-    switch (name) {
-      case 'SMILEYS':
-        return Icons.emoji_emotions_outlined;
-      case 'ANIMALS':
-        return Icons.pets_outlined;
-      case 'FOODS':
-        return Icons.restaurant_outlined;
-      case 'ACTIVITIES':
-        return Icons.sports_basketball_outlined;
-      case 'TRAVEL':
-        return Icons.directions_car_outlined;
-      case 'OBJECTS':
-        return Icons.lightbulb_outline;
-      case 'SYMBOLS':
-        return Icons.alternate_email;
-      case 'FLAGS':
-        return Icons.flag_outlined;
-      default:
-        return Icons.circle_outlined;
+    final u = name.trim().toUpperCase();
+
+    // emoji_picker_flutter может возвращать разные имена категорий
+    // (например, FOOD/FOODS, ACTIVITY/ACTIVITIES, SMILEYS_AND_PEOPLE и т.п.)
+    if (u.contains('SMILE')) return Icons.emoji_emotions_outlined;
+    if (u.contains('PEOPLE') || u.contains('PERSON')) {
+      return Icons.emoji_people_outlined;
     }
+    if (u.contains('ANIMAL') || u.contains('PET')) return Icons.pets_outlined;
+    if (u.contains('NATURE') || u.contains('PLANT')) return Icons.park_outlined;
+    if (u.contains('FOOD') || u.contains('DRINK')) return Icons.restaurant_outlined;
+    if (u.contains('ACTIV')) return Icons.sports_basketball_outlined;
+    if (u.contains('TRAVEL') || u.contains('PLACE') || u.contains('TRANSPORT')) {
+      return Icons.directions_car_outlined;
+    }
+    if (u.contains('OBJECT')) return Icons.lightbulb_outline;
+    if (u.contains('SYMBOL')) return Icons.alternate_email;
+    if (u.contains('FLAG')) return Icons.flag_outlined;
+    return Icons.circle_outlined;
   }
 
   void _pick(Emoji e) {
@@ -266,6 +273,8 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
       }
     });
   }
+
+  void _selectEmoji(Emoji e) => _pick(e);
 
   Future<List<Emoji>> _search(String q) async {
     final query = _norm(q);
@@ -322,7 +331,8 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
   }
 
   Widget _recentsBlock(Color onSurface) {
-    final items = _recents.take(_recentsLimit).toList(growable: true);
+    // 3 ряда по 9 как первая "папка".
+    final items = _recents.take(_recentsSectionCount).toList(growable: true);
     if (items.isEmpty) {
       // show first row from default set
       final flat = defaultEmojiSet.expand((c) => c.emoji);
@@ -406,16 +416,7 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
               child: Text('Результаты',
                   style: Theme.of(context).textTheme.titleSmall?.copyWith(color: onSurface)),
             ),
-            if (kDebugMode)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                child: Text(
-                  _indexReady
-                      ? 'index en=$_enCount ru=$_ruCount'
-                      : 'index loading...' + (_indexErr != null ? ' err=$_indexErr' : ''),
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
+            // debug info убрано
             if (snap.connectionState == ConnectionState.waiting)
               const Padding(
                 padding: EdgeInsets.all(16),
@@ -471,8 +472,11 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
       return LayoutBuilder(
         builder: (context, constraints) {
           final all = _all;
-          final recents = (_recents.isNotEmpty ? _recents : all).take(16).toList(growable: false);
-          final perRow = ((constraints.maxWidth - 48) / 36).floor().clamp(6, 8);
+          // Липкая верхняя строка: только 1 ряд из 9 часто используемых.
+          final recents = (_recents.isNotEmpty ? _recents : all)
+              .take(_recentsStickyCount)
+              .toList(growable: false);
+          const perRow = _recentsStickyCount;
           List<Widget> buildRow(int start) {
             final end = (start + perRow).clamp(0, recents.length);
             final items = recents.sublist(start, end);
@@ -500,24 +504,30 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
           return Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              IconButton(
-                tooltip: widget.searchHint,
-                icon: const Icon(Icons.search),
-                onPressed: () {
-                  setState(() => _searchMode = true);
-                  Future.microtask(() => _searchFocus.requestFocus());
-                },
+              Padding(
+                padding: const EdgeInsets.only(left: 6, top: 6, right: 2),
+                child: Material(
+                  color: Theme.of(context).colorScheme.primary.withOpacity(0.10),
+                  shape: const CircleBorder(),
+                  child: IconButton(
+                    tooltip: widget.searchHint,
+                    icon: Icon(Icons.search, color: Theme.of(context).colorScheme.primary),
+                    onPressed: () {
+                      setState(() => _searchMode = true);
+                      Future.microtask(() => _searchFocus.requestFocus());
+                    },
+                  ),
+                ),
               ),
               const SizedBox(width: 4),
               Expanded(
                 child: Padding(
-                  padding: const EdgeInsets.only(top: 4),
+                  padding: const EdgeInsets.only(top: 6),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Wrap(children: buildRow(0)),
-                      if (recents.length > perRow) Wrap(children: buildRow(perRow)),
                     ],
                   ),
                 ),
@@ -535,11 +545,8 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
           tooltip: MaterialLocalizations.of(context).backButtonTooltip,
           icon: const Icon(Icons.arrow_back),
           onPressed: () {
-            setState(() {
-              _searchMode = false;
-              _query = '';
-              _filtered = const [];
-            });
+            setState(() => _searchMode = false);
+            _searchCtrl.clear();
             FocusScope.of(context).unfocus();
           },
         ),
@@ -551,16 +558,16 @@ class _FullEmojiPickerState extends State<FullEmojiPicker> {
               hintText: widget.searchHint,
               border: InputBorder.none,
             ),
-            onChanged: _onQueryChanged,
+            
           ),
         ),
-        if (_query.isNotEmpty)
+        if (_searchCtrl.text.isNotEmpty)
           IconButton(
             tooltip: 'Очистить',
             icon: const Icon(Icons.close),
             onPressed: () {
               _searchCtrl.clear();
-              _onQueryChanged('');
+              
               _searchFocus.requestFocus();
             },
           ),

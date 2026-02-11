@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../shared/source_settings_store.dart';
+import '../../shared/app_settings_store.dart';
 import 'sources_connections_page.dart';
 import '../matrix_test/matrix_test_page.dart';
 
@@ -11,6 +12,7 @@ class ProfilePage extends StatelessWidget {
   Widget build(BuildContext context) {
     // В HomeShell уже есть общий Scaffold + AppBar
     final store = SourceSettingsStore.instance;
+    final appSettings = AppSettingsStore.instance;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
@@ -38,6 +40,25 @@ class ProfilePage extends StatelessWidget {
         ),
 
         const SizedBox(height: 12),
+
+        ValueListenableBuilder<bool>(
+          valueListenable: appSettings.autoLoadFullHistory,
+          builder: (context, v, _) {
+            return Card(
+              child: SwitchListTile(
+                value: v,
+                title: const Text(
+                  'Автозагрузка всей истории в чате',
+                  style: TextStyle(fontWeight: FontWeight.w900),
+                ),
+                subtitle: const Text(
+                  'Если включить, при открытии чата попробуем докачать историю до конца. Может тормозить.',
+                ),
+                onChanged: (next) => appSettings.autoLoadFullHistory.value = next,
+              ),
+            );
+          },
+        ),
 
         Card(
           child: ListTile(

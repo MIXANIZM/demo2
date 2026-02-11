@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:demo_app/shared/widgets/full_emoji_picker.dart';
+import 'package:demo_app/shared/app_settings_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:matrix/matrix.dart' as mx;
 
@@ -69,6 +71,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
 
   mx.Timeline? _mxTimeline;
   bool _mxLoadingHistory = false;
+  bool _autoLoadingFullHistory = false;
 
   bool _selectionMode = false;
   final Set<String> _selectedIds = <String>{};
@@ -346,6 +349,10 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         _pendingNewMessages = 0;
       });
       _scrollToBottom();
+
+      // По умолчанию история подгружается по кнопке "Загрузить ещё".
+      // Если в настройках включили автозагрузку — докачиваем историю до конца.
+      unawaited(_autoLoadFullHistoryIfEnabled());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -731,6 +738,47 @@ if (local != null) {
         _pendingNewMessages += 1;
       });
     }
+  }
+
+  Future<void> _autoLoadFullHistoryIfEnabled() async {
+    if (_autoLoadingFullHistory) return;
+    if (!AppSettingsStore.instance.autoLoadFullHistoryOnOpen.value) return;
+    final timeline = _mxTimeline;
+    if (timeline == null) return;
+
+    _autoLoadingFullHistory = true;
+    if (mounted) {
+      setState(() {
+        _mxLoadingHistory = true;
+      });
+    }
+
+    int prevLen = timeline.events.length;
+    // Защита от бесконечного цикла: максимум 200 запросов.
+    for (int i = 0; i < 200; i++) {
+      try {
+        await timeline.requestHistory();
+      } catch (_) {
+        break;
+      }
+
+      // Дадим таймлайну/SDK обработать результат.
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      _syncUiFromMatrixTimeline();
+
+      final nowLen = timeline.events.length;
+      if (nowLen <= prevLen) {
+        break; // больше нечего подгружать
+      }
+      prevLen = nowLen;
+    }
+
+    if (mounted) {
+      setState(() {
+        _mxLoadingHistory = false;
+      });
+    }
+    _autoLoadingFullHistory = false;
   }
 
   Future<void> _sendMessage() async {
