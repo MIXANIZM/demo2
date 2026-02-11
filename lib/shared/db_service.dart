@@ -35,6 +35,59 @@ class DbService {
     await _ensureMessagesTable();
     await _ensureConversationStateTable();
     await _ensureEmojiUsageTable();
+    await _ensureRoomContactLinksTable();
+  }
+
+  /// Связь Matrix room_id -> contact_id.
+  ///
+  /// Задача: ручная привязка комнаты (room) к конкретному контакту.
+  /// Держим отдельной таблицей, чтобы не ломать текущую схему conversations/messages.
+
+  Future<void> _ensureRoomContactLinksTable() async {
+    final d = database;
+    await d.customStatement('''
+      CREATE TABLE IF NOT EXISTS room_contact_links (
+        room_id TEXT PRIMARY KEY,
+        contact_id TEXT NOT NULL,
+        linked_at_ms INTEGER NOT NULL
+      );
+    ''');
+  }
+
+  /// Сохранить/обновить связь room_id -> contact_id.
+  ///
+  /// Используем upsert, чтобы повторная привязка не плодила строки.
+  Future<void> linkRoomToContact({
+    required String roomId,
+    required String contactId,
+  }) async {
+    final d = database;
+    await _ensureRoomContactLinksTable();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await d.customStatement(
+      'INSERT INTO room_contact_links(room_id, contact_id, linked_at_ms) VALUES (?, ?, ?) '
+      'ON CONFLICT(room_id) DO UPDATE SET contact_id = excluded.contact_id, linked_at_ms = excluded.linked_at_ms',
+      [roomId, contactId, now],
+    );
+  }
+
+  /// Вернуть contact_id для room_id, если привязка существует.
+  Future<String?> getLinkedContactIdForRoom(String roomId) async {
+    final d = database;
+    await _ensureRoomContactLinksTable();
+    final rows = await d.customSelect(
+      'SELECT contact_id FROM room_contact_links WHERE room_id = ? LIMIT 1',
+      variables: [Variable<String>(roomId)],
+    ).get();
+    if (rows.isEmpty) return null;
+    return rows.first.read<String>('contact_id');
+  }
+
+  /// Удалить привязку (если нужна ручная отвязка в будущем).
+  Future<void> unlinkRoom(String roomId) async {
+    final d = database;
+    await _ensureRoomContactLinksTable();
+    await d.customStatement('DELETE FROM room_contact_links WHERE room_id = ?', [roomId]);
   }
 
   Future<void> _ensureEmojiUsageTable() async {

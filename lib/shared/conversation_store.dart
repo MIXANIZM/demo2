@@ -239,6 +239,11 @@ class ConversationStore {
       );
     }
 
+    // Для Matrix-диалогов handle обычно = room_id. Сохраняем явную привязку.
+    if (conv.source == MessageSource.matrix) {
+      await DbService.instance.linkRoomToContact(roomId: conv.handle, contactId: contactId);
+    }
+
     conv.contactId = contactId;
     version.value++;
     await DbService.instance.upsertConversation(conv);
@@ -258,6 +263,10 @@ class ConversationStore {
       handle: conv.handle,
       displayName: conv.handle,
     );
+
+    if (conv.source == MessageSource.matrix) {
+      await DbService.instance.linkRoomToContact(roomId: conv.handle, contactId: c.id);
+    }
 
     conv.contactId = c.id;
     version.value++;
