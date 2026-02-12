@@ -1073,7 +1073,7 @@ Widget build(BuildContext context) {
                       ),
                       PopupMenuItem<_ChatMenuAction>(
                         value: _ChatMenuAction.deleteDialog,
-                        enabled: effectiveConversationId != null,
+                        enabled: _effectiveConversationId != null,
                         child: const Text('Удалить диалог (в приложении)'),
                       ),
                     ];

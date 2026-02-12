@@ -523,6 +523,27 @@ Future<List<StoredChatMessage>> loadMessages({
         .go();
   }
 
+  /// Deletes all local dialog history for a contact (messages + state + room links).
+  /// This does NOT delete anything in Telegram/WhatsApp/etc. Only local app DB.
+  Future<void> deleteDialogsForContact(String contactId) async {
+    // Collect conversations that have messages for this contact.
+    final rows = await db.customSelect(
+      'SELECT DISTINCT conversation_id FROM messages WHERE contact_id = ?',
+      variables: [Variable<String>(contactId)],
+    ).get();
+
+    for (final r in rows) {
+      final convId = r.read<String>('conversation_id');
+      await deleteConversation(convId);
+    }
+
+    // Remove room->contact links so the app doesn't keep pointing to old rooms.
+    await db.customStatement(
+      'DELETE FROM room_contact_links WHERE contact_id = ?',
+      [contactId],
+    );
+  }
+
   Future<void> deleteContact(String contactId) async {
     // Remove all conversations for this contact (and related messages).
     final convs = await (db.select(db.conversationsTable)

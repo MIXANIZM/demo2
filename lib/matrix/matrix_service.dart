@@ -723,7 +723,8 @@ Future<String?> createTelegramPortalByPhone(
 
       // If the portal already exists (or got created very fast), it may already be present.
       if (expectedPuppetMxid != null) {
-        final existing = _findDirectRoomWithMxid(expectedPuppetMxid);
+        var existing = _findDirectRoomWithMxid(expectedPuppetMxid);
+        existing ??= await _findRoomByParticipantMxid(expectedPuppetMxid);
         if (existing != null) {
           _expectedDirectMxid = null;
           return existing;
@@ -917,22 +918,49 @@ Future<bool> startWhatsAppPmByPhone(String phoneE164) async {
 }
 
   String? _findDirectRoomWithMxid(String mxid) {
-    final client = _client;
-    if (client == null) return null;
+  final client = _client;
+  if (client == null) return null;
 
-    for (final room in client.rooms) {
-      try {
-        final isDirect = room.isDirectChat == true;
-        final joined = room.membership == Membership.join;
-        if (isDirect && joined && room.directChatMatrixID == mxid) {
-          return room.id;
-        }
-      } catch (_) {
-        // ignore
+  for (final room in client.rooms) {
+    try {
+      final isDirect = room.isDirectChat == true;
+      final directId = room.directChatMatrixID;
+      if (isDirect && directId == mxid) {
+        return room.id;
       }
+    } catch (_) {
+      // ignore
     }
-    return null;
   }
+  return null;
+}
+
+Future<String?> _findRoomByParticipantMxid(String mxid) async {
+  final client = _client;
+  if (client == null) return null;
+
+  for (final room in client.rooms) {
+    try {
+      // Skip non-joined rooms
+      if (room.membership != Membership.join) continue;
+
+      final members = await room.requestParticipants();
+      if (members.isEmpty) continue;
+
+      final hasTarget = members.any((u) => u.id == mxid);
+      if (!hasTarget) continue;
+
+      // Likely a DM/portal: 2-3 members (you + contact + bridge/bot)
+      final joinedCount = members.length;
+      if (joinedCount <= 3) {
+        return room.id;
+      }
+    } catch (_) {
+      // ignore and continue
+    }
+  }
+  return null;
+}
 
   Future<String?> _waitForBotRegex({
     required Room dm,

@@ -421,9 +421,16 @@ class ContactStore {
     if (idx < 0) return;
     _contacts.removeAt(idx);
     _deindexContact(contactId);
-    notifyListeners();
+    _bump();
 
     await DbService.instance.deleteContact(contactId);
+  }
+
+  /// Delete local dialog history for this contact (messages/state/room links).
+  /// Does NOT delete chats in Telegram/etc.
+  Future<void> deleteDialogsForContact(String contactId) async {
+    await DbService.instance.deleteDialogsForContact(contactId);
+    _bump();
   }
 
   void _persist(Contact c) {

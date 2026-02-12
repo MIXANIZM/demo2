@@ -63,6 +63,35 @@ class _ContactPageState extends State<ContactPage> {
           PopupMenuButton<String>(
             tooltip: 'Ещё',
             onSelected: (v) async {
+              if (v == 'delete_dialogs') {
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) {
+                    return AlertDialog(
+                      title: const Text('Удалить диалоги?'),
+                      content: const Text(
+                        'Удалит историю сообщений и привязки комнат только внутри приложения. В Telegram это ничего не удалит.',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(false),
+                          child: const Text('Отмена'),
+                        ),
+                        FilledButton(
+                          onPressed: () => Navigator.of(ctx).pop(true),
+                          child: const Text('Удалить'),
+                        ),
+                      ],
+                    );
+                  },
+                );
+                if (ok == true) {
+                  await ContactStore.instance.deleteDialogsForContact(contact.id);
+                  if (!mounted) return;
+                  setState(() {});
+                }
+                return;
+              }
               if (v == 'delete_contact') {
                 final ok = await showDialog<bool>(
                   context: context,
@@ -93,6 +122,10 @@ class _ContactPageState extends State<ContactPage> {
               }
             },
             itemBuilder: (ctx) => const [
+              PopupMenuItem(
+                value: 'delete_dialogs',
+                child: Text('Удалить диалоги (локально)'),
+              ),
               PopupMenuItem(
                 value: 'delete_contact',
                 child: Text('Удалить контакт'),
