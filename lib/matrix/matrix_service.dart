@@ -46,15 +46,27 @@ class MatrixService {
   Client? _client;
   MatrixSdkDatabase? _db;
   StreamSubscription? _syncSub;
+  DateTime? _lastSyncAt;
+
+  // Cache management-room ids for bridge bots to avoid creating multiple DMs.
+  final Map<String, String> _botDmRoomIdByMxid = <String, String>{};
 
   Uri? _homeserver;
+
+  /// True when мы уверены, что клиент реально может ходить на сервер (sync/ping OK).
+  final ValueNotifier<bool> online = ValueNotifier<bool>(false);
 
   void _setStatus(String s) {
     status.value = s;
     _log(s);
   }
 
-  void _log(String m) => MatrixUiLogger.instance.log('[MatrixService] $m');
+  void _log(String m, {Object? err, StackTrace? st}) {
+    final b = StringBuffer('[MatrixService] $m');
+    if (err != null) b.write(' | err=$err');
+    if (st != null) b.write('\n$st');
+    MatrixUiLogger.instance.log(b.toString());
+  }
 
   Client? get client => _client;
   Uri? get homeserver => _homeserver;
@@ -70,7 +82,11 @@ Future<Map<String, String?>> loadSavedAuth() async {
   };
 }
 
-Future<MatrixSessionInfo?> autoConnectFromSaved() async {
+Future<MatrixSessionInfo?> autoConnectFromSaved({bool force = false}) async {
+    if (force) {
+      await _resetClientForReconnect();
+    }
+
     final hs = await _storage.read(key: 'matrix_hs');
     final user = await _storage.read(key: 'matrix_user');
     final pass = await _storage.read(key: 'matrix_pass');
@@ -93,17 +109,36 @@ Future<MatrixSessionInfo?> autoConnectFromSaved() async {
         homeserver: hs!.trim(),
         username: user!.trim(),
         password: pass!,
+        force: force,
       );
     }
 
     if (tokenOk) {
       _log('autoConnectFromSaved: found saved token, trying token login...');
-      return connectWithAccessToken(homeserver: hs!.trim(), accessToken: token!.trim());
+      return connectWithAccessToken(
+        homeserver: hs!.trim(),
+        accessToken: token!.trim(),
+        force: force,
+      );
     }
 
     _log('autoConnectFromSaved: nothing saved');
     return null;
   }
+
+  Future<void> _resetClientForReconnect() async {
+    try {
+      _syncSub?.cancel();
+    } catch (_) {}
+    _syncSub = null;
+    online.value = false;
+    connected.value = false;
+
+    // Recreate client from scratch (without logging out, so we can re-login using saved creds).
+    _client = null;
+    _db = null;
+  }
+
 
   Future<void> _ensureClient() async {
     if (_client != null) return;
@@ -122,6 +157,11 @@ Future<MatrixSessionInfo?> autoConnectFromSaved() async {
 
     await _client!.init();
     _log('Client.init() OK');
+
+    // Restore homeserver from SDK if possible (important when SDK восстановил сессию из БД).
+    try {
+      _homeserver ??= _client!.homeserver;
+    } catch (_) {}
 
     // Keep connected notifier in sync with SDK.
     connected.value = _client!.isLogged();
@@ -147,6 +187,7 @@ Future<MatrixSessionInfo?> autoConnectFromSaved() async {
   }
 
   Future<MatrixSessionInfo> connectWithAccessToken({
+    bool force = false,
     required String homeserver,
     required String accessToken,
   }) async {
@@ -154,9 +195,9 @@ Future<MatrixSessionInfo?> autoConnectFromSaved() async {
 
     // Avoid "already logged in" precondition errors.
     final already = _client;
-    if (already != null) {
+    if (!force && already != null) {
       try {
-        if (already.isLogged()) {
+        if (!force && already.isLogged()) {
           connected.value = true;
           _setStatus('connect: already logged');
           _log('connectWithAccessToken: already logged-in, reusing session');
@@ -199,6 +240,7 @@ Future<MatrixSessionInfo?> autoConnectFromSaved() async {
   }
 
   Future<MatrixSessionInfo> connectWithPassword({
+    bool force = false,
     required String homeserver,
     required String username,
     required String password,
@@ -207,9 +249,9 @@ Future<MatrixSessionInfo?> autoConnectFromSaved() async {
 
     // Avoid "already logged in" precondition errors.
     final already = _client;
-    if (already != null) {
+    if (!force && already != null) {
       try {
-        if (already.isLogged()) {
+        if (!force && already.isLogged()) {
           connected.value = true;
           _setStatus('connect: already logged');
           _log('connectWithPassword: already logged-in, reusing session');
@@ -270,10 +312,13 @@ Future<MatrixSessionInfo?> autoConnectFromSaved() async {
     _setStatus('sync: oneShotSync…');
     try {
       await client.oneShotSync(timeout: const Duration(seconds: 10));
+      online.value = true;
     } on TimeoutException catch (_) {
       _setStatus('sync: oneShotSync timeout (continue)');
     } catch (e) {
       _setStatus('sync: oneShotSync error (continue): $e');
+      // If sync fails due to network/server, mark offline.
+      online.value = false;
     }
     _setStatus('sync: rooms=${client.rooms.length}');
     roomsVersion.value++;
@@ -298,9 +343,53 @@ Future<MatrixSessionInfo?> autoConnectFromSaved() async {
 // If we get invited while app is running, auto-join.
           _autoJoinInvites(reason: 'onSync').catchError((_) {});
         }
+        // Any successful sync tick means we're online.
+        online.value = true;
+        _lastSyncAt = DateTime.now();
       },
-      onError: (e, st) => _log('onSync error: $e'),
+      onError: (e, st) {
+        _log('onSync error: $e');
+        online.value = false;
+      },
     );
+  }
+
+  bool _recentlyOnline({Duration within = const Duration(seconds: 30)}) {
+    final t = _lastSyncAt;
+    if (t == null) return false;
+    return DateTime.now().difference(t) <= within;
+  }
+
+  /// Best-effort check that the client can talk to the homeserver right now.
+  /// Returns true if a quick call succeeds, otherwise false.
+  Future<bool> ensureOnline({Duration timeout = const Duration(seconds: 6), bool requireFreshSync = false}) async {
+    final c = _client;
+    if (c == null || !c.isLogged()) {
+      online.value = false;
+      return false;
+    }
+    // If we have a recent sync tick, don't do an extra oneShotSync.
+    // oneShotSync may get cancelled on some Android devices when the client is already syncing.
+    if (online.value == true && _recentlyOnline()) {
+      return true;
+    }
+    // matrix >= 6.0.0 doesn't expose whoAmI(); use a short oneShotSync as a ping.
+    try {
+      await c.oneShotSync(timeout: timeout);
+      online.value = true;
+      _lastSyncAt = DateTime.now();
+      return true;
+    } catch (e) {
+      _log('ensureOnline: oneShotSync failed: $e');
+      // If we're logged in and already have rooms, treat this as "possibly online".
+      // We'll still try bridge commands – worst case they time out and we show a clear error.
+      if (c.isLogged() && c.rooms.isNotEmpty) {
+        online.value = true;
+        return true;
+      }
+      online.value = false;
+      return false;
+    }
   }
 
   
@@ -397,4 +486,444 @@ void _upsertMatrixRoomsIntoInbox() {
   }
 }
 
+
+// ===== Bridge helpers (mautrix-telegram / mautrix-whatsapp) =====
+
+String _defaultBotMxid(String localpart) {
+  // IMPORTANT:
+  // If Synapse is accessed via an IP (or IP:port), hs.host will be that IP.
+  // But MXID domains must match the server_name of the homeserver (here it's
+  // tg.agatzub.ru). Otherwise the bot MXID becomes invalid and the app will
+  // fail to find/create the management DM.
+  if (localpart == 'telegrambot') {
+    return '@telegrambot:tg.agatzub.ru';
+  }
+
+  final hs = _client?.homeserver;
+  final host = hs?.host ?? '';
+  if (host.isEmpty) {
+    throw Exception('Matrix homeserver не задан');
+  }
+  return '@$localpart:$host';
 }
+
+Future<Room> _ensureBotDM(String botMxid) async {
+  final client = _client;
+  if (client == null) throw Exception('Matrix не инициализирован');
+
+  // 0) Lead with cached room id (prevents creating many "Bridge bot" rooms).
+  final cachedId = _botDmRoomIdByMxid[botMxid];
+  if (cachedId != null) {
+    final cachedRoom = client.getRoomById(cachedId);
+    if (cachedRoom != null) return cachedRoom;
+  }
+
+  // 1) Пробуем найти уже существующий DM (если SDK пометил как direct)
+  for (final r in client.rooms) {
+    if (r.isDirectChat && r.directChatMatrixID == botMxid) {
+      _botDmRoomIdByMxid[botMxid] = r.id;
+      return r;
+    }
+  }
+
+  // 1b) Фоллбек: некоторые SDK/серверы не выставляют isDirectChat/directChatMatrixID.
+  // Тогда используем эвристику "Bridge bot" + участники (я + бот).
+  for (final r in client.rooms) {
+    if (r.membership != Membership.join) continue;
+    // Быстрый фильтр по названию (чтобы не делать requestParticipants на все комнаты).
+    final dn = (r.displayname).toString();
+    if (dn != 'Bridge bot') continue;
+    try {
+      final users = await r.requestParticipants(
+        const [Membership.join, Membership.invite],
+        true,
+        false,
+      );
+      final ids = users.map((u) => u.id).toSet();
+      if (ids.contains(botMxid) && ids.contains(client.userID) && ids.length == 2) {
+        _botDmRoomIdByMxid[botMxid] = r.id;
+        return r;
+      }
+    } catch (_) {
+      // ignore and continue
+    }
+  }
+
+  // 2) Фоллбек: ищем комнату "я + бот" по участникам
+  for (final r in client.rooms) {
+    if (r.membership != Membership.join) continue;
+    try {
+      final users = await r.requestParticipants(
+        const [Membership.join, Membership.invite],
+        true,
+        false,
+      );
+      final ids = users.map((u) => u.id).toSet();
+      if (ids.contains(botMxid) && ids.contains(client.userID) && ids.length == 2) {
+        _botDmRoomIdByMxid[botMxid] = r.id;
+        return r;
+      }
+    } catch (_) {
+      // ignore and continue
+    }
+  }
+
+  // 3) Создаем новый DM с ботом
+  final roomId = await client.createGroupChat(
+    invite: [botMxid],
+    preset: CreateRoomPreset.privateChat,
+    waitForSync: true,
+    groupName: 'Bridge bot',
+    enableEncryption: false,
+  );
+
+  // Кэшируем сразу, даже если Room объект появится чуть позже.
+  _botDmRoomIdByMxid[botMxid] = roomId;
+
+  // Ждём появления комнаты в client.rooms
+  final end = DateTime.now().add(const Duration(seconds: 10));
+  while (DateTime.now().isBefore(end)) {
+    final room = client.getRoomById(roomId);
+    if (room != null) return room;
+    await Future.delayed(const Duration(milliseconds: 250));
+  }
+
+  throw Exception('Не удалось получить комнату управления мостом');
+}
+
+  /// Best-effort: find a room created by telegram bridge for a given phone.
+  /// We match against room displayname/name/topic and normalize phone digits.
+  Future<String?> waitTelegramPortalRoomByPhone(String phoneE164, {Duration timeout = const Duration(seconds: 12)}) async {
+    final client = _client;
+    if (client == null) return null;
+
+    String norm(String s) => s.replaceAll(RegExp(r'[^0-9+]'), '');
+    final wanted = norm(phoneE164);
+
+    bool matches(Room r) {
+      String d = '';
+      try { d = (r.displayname ?? '').toString(); } catch (_) {}
+      String n = '';
+      try { n = ((r as dynamic).name ?? '').toString(); } catch (_) {}
+      String t = '';
+      try { t = ((r as dynamic).topic ?? '').toString(); } catch (_) {}
+      final text = '$d $n $t';
+      final m = RegExp(r'(\+?\d[\d\s\-()]{7,}\d)').firstMatch(text);
+      if (m == null) return false;
+      final got = norm(m.group(1)!);
+      return got == wanted || got.endsWith(wanted.replaceFirst('+', ''));
+    }
+
+    final end = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(end)) {
+      for (final r in client.rooms) {
+        if (r.id.startsWith('!') && r.membership == Membership.join) {
+          if (matches(r)) return r.id;
+        }
+      }
+      await Future.delayed(const Duration(milliseconds: 800));
+    }
+    return null;
+  }
+
+  /// High-level helper: ask bridge to open a PM by phone and then wait for the portal room to appear.
+  
+Future<void> _sendMgmtWithRetry({
+  required String mgmtRoomId,
+  required String text,
+  int attempts = 3,
+  Duration baseDelay = const Duration(milliseconds: 600),
+}) async {
+  Object? lastErr;
+  StackTrace? lastSt;
+  for (var i = 0; i < attempts; i++) {
+    try {
+      await _client!.getRoomById(mgmtRoomId)!.sendTextEvent(text);
+      return;
+    } catch (e, st) {
+      lastErr = e;
+      lastSt = st;
+      _log('mgmt send failed (attempt ${i + 1}/$attempts): $e', st: st);
+      if (i < attempts - 1) {
+        final d = Duration(milliseconds: baseDelay.inMilliseconds * (1 << i));
+        await Future<void>.delayed(d);
+      }
+    }
+  }
+  // After retries
+  _log('mgmt send giving up: $lastErr', st: lastSt);
+  throw lastErr ?? Exception('mgmt send failed');
+}
+
+Future<String?> createTelegramPortalByPhone(
+    String phoneE164, {
+    String? displayName,
+    void Function(String stage)? onProgress,
+    Duration timeout = const Duration(seconds: 60),
+  }) async {
+    final client = _client;
+    if (client == null || !client.isLogged()) return null;
+
+    // Если Matrix не онлайн, попробуем форс-переподключение из сохраненных данных.
+    var isOk = await ensureOnline();
+    if (!isOk) {
+      await autoConnectFromSaved(force: true);
+      isOk = await ensureOnline(timeout: const Duration(seconds: 10));
+    }
+    if (!isOk) return null;
+
+    try {
+      final botMxid = _defaultBotMxid('telegrambot');
+      onProgress?.call('Открываю management-room…');
+      final dm = await _ensureBotDM(botMxid);
+
+      // Snapshot текущих комнат: после `pm` мост обычно делает invite в новую portal-room.
+      final beforeRooms = client.rooms.map((r) => r.id).toSet();
+
+      // ВАЖНО: это DM/management room с ботом (@telegrambot:...)
+      // В management room команды отправляются БЕЗ префикса (!tg не нужен).
+      // 1) add-contact (best-effort)
+      // 2) sync contacts
+      // 3) pm
+      final name = (displayName == null || displayName.trim().isEmpty) ? phoneE164 : displayName.trim();
+      final parts = name.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+      final first = parts.isNotEmpty ? parts.first : phoneE164;
+      final last = parts.length >= 2 ? parts.sublist(1).join(' ') : '-';
+
+      onProgress?.call('Добавляю контакт в Telegram…');
+      await dm.sendTextEvent('add-contact $phoneE164 $first $last');
+      await Future.delayed(const Duration(milliseconds: 800));
+
+      onProgress?.call('Синхронизирую контакты…');
+      await dm.sendTextEvent('sync contacts');
+      await Future.delayed(const Duration(milliseconds: 1200));
+
+      onProgress?.call('Создаю чат…');
+      await dm.sendTextEvent('pm $phoneE164');
+      onProgress?.call('Ожидаю комнату…');
+      // Иногда мост создаёт комнату мгновенно или она уже была создана ранее
+      roomId ??= _findRoomByNameOrPhone(phone: phone, displayName: displayName);
+
+      // Важный момент: портал-рум может называться как угодно (имя контакта),
+      // поэтому искать по номеру в displayname ненадёжно.
+      // Мост почти всегда отвечает в DM текстом с room id вида !abc:server.
+      final roomId = await _waitPortalRoomIdFromBot(dm);
+      if (roomId == null) {
+        // 1) Фоллбек: ждём появление новой комнаты (invite/join)
+        final created = await _waitNewJoinedRoom(beforeRooms, timeout: timeout);
+        if (created != null) return created;
+
+        // 2) Старый фоллбек на эвристику по номеру.
+        return await waitTelegramPortalRoomByPhone(phoneE164);
+      }
+
+      // Авто-джоин (на случай если invite ещё не принят).
+      try {
+        final r = client.getRoomById(roomId);
+        if (r != null && r.membership != Membership.join) {
+          await r.join();
+        }
+      } catch (_) {}
+
+      return roomId;
+    } catch (e) {
+      _log('createTelegramPortalByPhone error: $e');
+      return null;
+    }
+  }
+
+  /// Wait until a *new* joined room appears compared to [before].
+  /// This is useful for bridges that invite you to a new portal room after `pm`.
+  Future<String?> _waitNewJoinedRoom(Set<String> before, {Duration timeout = const Duration(seconds: 15)}) async {
+    final client = _client;
+    if (client == null) return null;
+
+    final end = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(end)) {
+      try {
+        // Accept invites eagerly.
+        await _autoJoinInvites(reason: 'waitNewJoinedRoom');
+      } catch (_) {}
+
+      String? best;
+      int bestScore = -1;
+      for (final r in client.rooms) {
+        if (before.contains(r.id)) continue;
+        if (r.membership != Membership.join) continue;
+
+        // Filter out obvious management rooms.
+        final dn = (r.displayname ?? '').toString().toLowerCase();
+        if (dn.contains('bridge bot') || dn.contains('telegrambot') || dn.contains('whatsappbot')) continue;
+
+        // Score: prefer rooms with some name/message.
+        int score = 0;
+        if (dn.isNotEmpty) score += 2;
+        try {
+          final last = (r as dynamic).lastEvent ?? (r as dynamic).lastEventId;
+          if (last != null) score += 1;
+        } catch (_) {}
+        if (score > bestScore) {
+          bestScore = score;
+          best = r.id;
+        }
+      }
+
+      if (best != null) return best;
+      await Future.delayed(const Duration(milliseconds: 600));
+    }
+    return null;
+  }
+
+
+  String? _findRoomByNameOrPhone({
+    required String phone,
+    required String displayName,
+  }) {
+    final phoneDigits = phone.replaceAll(RegExp(r'[^0-9+]'), '');
+    for (final r in client.rooms) {
+      try {
+        if (r.membership != Membership.join) continue;
+        final name = (r.displayname ?? '').trim();
+        final topic = (r.topic ?? '').trim();
+        if (name.isEmpty && topic.isEmpty) continue;
+
+        bool match(String s) {
+          final t = s.trim();
+          if (t.isEmpty) return false;
+          if (t.contains(displayName)) return true;
+          if (phoneDigits.isNotEmpty && t.contains(phoneDigits)) return true;
+          if (t.contains(phone)) return true;
+          return false;
+        }
+
+        if (match(name) || match(topic)) {
+          return r.id;
+        }
+      } catch (_) {
+        // ignore
+      }
+    }
+    return null;
+  }
+
+  Future<String?> _pollFindRoomByNameOrPhone({
+    required String phone,
+    required String displayName,
+    required Duration timeout,
+    Duration step = const Duration(seconds: 1),
+  }) async {
+    final endAt = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(endAt)) {
+      final found = _findRoomByNameOrPhone(phone: phone, displayName: displayName);
+      if (found != null) return found;
+      await Future.delayed(step);
+    }
+    return null;
+  }
+
+  /// Waits for a management-bot reply that contains a portal room id.
+  /// Typical reply includes something like "Created room !xxxx:hs".
+  Future<String?> _waitPortalRoomIdFromBot(Room dm, {Duration timeout = const Duration(seconds: 12)}) async {
+    try {
+      final completer = Completer<String?>();
+
+      Timeline? timeline;
+      timeline = await dm.getTimeline(
+        onUpdate: () {
+          // scan whole list (cheap, small)
+          final rid = _extractRoomIdFromTimeline(timeline);
+          if (rid != null && !completer.isCompleted) completer.complete(rid);
+        },
+        onInsert: (i) {
+          final rid = _extractRoomIdFromTimeline(timeline);
+          if (rid != null && !completer.isCompleted) completer.complete(rid);
+        },
+        onChange: (i) {
+          final rid = _extractRoomIdFromTimeline(timeline);
+          if (rid != null && !completer.isCompleted) completer.complete(rid);
+        },
+        onRemove: (i) {},
+      );
+
+      // Also scan immediately.
+      final immediate = _extractRoomIdFromTimeline(timeline);
+      if (immediate != null) return immediate;
+
+      // Wait until timeout.
+      return await completer.future.timeout(timeout, onTimeout: () => null);
+    } catch (e) {
+      _log('_waitPortalRoomIdFromBot failed: $e');
+      return null;
+    }
+  }
+
+  String? _extractRoomIdFromTimeline(Timeline? timeline) {
+    if (timeline == null) return null;
+    // Scan last ~30 events for a room id token.
+    final events = timeline.events;
+    final start = events.length > 30 ? events.length - 30 : 0;
+    for (int i = events.length - 1; i >= start; i--) {
+      try {
+        final ev = events[i];
+        final body = ev.getDisplayEvent(timeline).body.toString();
+        final m = RegExp(r'(![A-Za-z0-9]+:[A-Za-z0-9.:-]+)').firstMatch(body);
+        if (m != null) return m.group(1);
+      } catch (_) {
+        // ignore
+      }
+    }
+    return null;
+  }
+
+/// Старт приватного чата в Telegram через mautrix-telegram, командой `pm <phone>`
+Future<bool> startTelegramPmByPhone(String phoneE164, {String? displayName}) async {
+  final client = _client;
+  if (client == null || !(connected.value)) return false;
+  try {
+    final botMxid = _defaultBotMxid('telegrambot');
+    final room = await _ensureBotDM(botMxid);
+
+    // Важно:
+    // - `pm <phone>` работает только если номер есть в Telegram-контактах аккаунта моста.
+    // - Начиная с mautrix-telegram v0.15.0 есть команда `add-contact`, которая добавляет номер в контакты Telegram.
+    // Поэтому делаем:
+    //   1) add-contact (если команда не поддерживается — бот ответит ошибкой, но мы не падаем)
+    //   2) sync contacts (на случай, если мост кэширует список)
+    //   3) pm <phone>
+    final name = (displayName == null || displayName.trim().isEmpty) ? phoneE164 : displayName.trim();
+
+    // Разбиваем имя на first/last, чтобы команда была более совместимой.
+    final parts = name.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+    final first = parts.isNotEmpty ? parts.first : phoneE164;
+    final last = parts.length >= 2 ? parts.sublist(1).join(' ') : '-';
+
+    await room.sendTextEvent('add-contact $phoneE164 $first $last');
+    await _sendMgmtWithRetry(mgmtRoomId: room.id, text: 'sync contacts');
+    await room.sendTextEvent('pm $phoneE164');
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+
+/// Старт приватного чата в WhatsApp через mautrix-whatsapp, командой `pm <phone>`
+Future<bool> startWhatsAppPmByPhone(String phoneE164) async {
+  final client = _client;
+  if (client == null || !(connected.value)) return false;
+  try {
+    final botMxid = _defaultBotMxid('whatsappbot');
+    final room = await _ensureBotDM(botMxid);
+    await room.sendTextEvent('pm $phoneE164');
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+}
+    final existing = _findRoomByNameOrPhone(phone: phone, displayName: displayName);
+    if (existing != null) {
+      onProgress?.call('Чат уже существует, открываю…');
+      return existing;
+    }
+

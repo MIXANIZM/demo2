@@ -58,6 +58,16 @@ class _InboxPageState extends ConsumerState<InboxPage> {
     }
 
     return convs
+        .where((c) {
+          // Скрываем системные комнаты моста ("Bridge bot"), чтобы они не засоряли Inbox.
+          // Это не реальные диалоги, а сервисные DM/уведомления от бота.
+          if (c.source == MessageSource.telegram) {
+            final contact = _store.tryGet(c.contactId);
+            final name = contact?.preferredTitle ?? '';
+            if (name.trim() == 'Bridge bot') return false;
+          }
+          return true;
+        })
         .map((c) {
           final contact = _store.tryGet(c.contactId);
           final name = contact?.preferredTitle ?? c.handle;

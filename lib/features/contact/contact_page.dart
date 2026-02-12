@@ -4,10 +4,13 @@ import '../chat/chat_page.dart';
 import '../../shared/contact_models.dart';
 import '../../shared/contact_store.dart';
 import '../../shared/conversation_store.dart';
+import '../../shared/bridge_chat_launcher.dart';
+import '../../shared/db_service.dart';
 import '../../shared/phone_utils.dart';
 import '../../shared/label_catalog.dart';
 import '../../shared/label_models.dart';
 import '../../shared/message_source.dart';
+import '../../matrix/matrix_service.dart';
 
 class ContactPage extends StatefulWidget {
   final String contactId;
@@ -48,16 +51,55 @@ class _ContactPageState extends State<ContactPage> {
       appBar: AppBar(
         title: Text(contact.preferredTitle),
         actions: [
-          IconButton(
-            tooltip: 'Редактировать',
-            icon: const Icon(Icons.edit_outlined),
-            onPressed: () async {
-              await _openEditContactSheet(contact);
-              if (!mounted) return;
-              setState(() {});
-            },
-          ),
-        ],
+        IconButton(
+          icon: const Icon(Icons.edit),
+          onPressed: () => _edit(context),
+        ),
+        PopupMenuButton<String>(
+          onSelected: (v) async {
+            if (v == 'delete_dialogs') {
+              final ok = await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('Удалить диалоги'),
+                  content: const Text('Удалить локальную историю переписок по этому контакту (в приложении)? В Telegram ничего не удалится.'),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                    TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить')),
+                  ],
+                ),
+              );
+              if (ok != true) return;
+              final roomIds = await DbService.instance.getLinkedRoomIdsForContact(contact.id);
+              for (final rid in roomIds) {
+                await ConversationStore.instance.deleteConversation(rid);
+              }
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Диалоги удалены (локально).')));
+              }
+            } else if (v == 'delete_contact') {
+              final ok = await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('Удалить контакт'),
+                  content: const Text('Удалить контакт и всю локальную историю по нему? В Telegram контакт/чат не удалятся.'),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                    TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить')),
+                  ],
+                ),
+              );
+              if (ok != true) return;
+              await ContactStore.instance.deleteContact(contact.id);
+              if (context.mounted) Navigator.pop(context);
+            }
+          },
+          itemBuilder: (ctx) => const [
+            PopupMenuItem(value: 'delete_dialogs', child: Text('Удалить диалоги (локально)')),
+            PopupMenuItem(value: 'delete_contact', child: Text('Удалить контакт (локально)')),
+          ],
+        ),
+      ],
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
@@ -81,7 +123,16 @@ class _ContactPageState extends State<ContactPage> {
             children: channelsSorted.map((ch) {
               return _ChannelChip(
                 channel: ch,
-                                onTap: () {
+                onTap: () async {
+                  // Special case: Telegram by PHONE should open the real bridge portal room, not a "fake" phone-handle chat.
+                  if (ch.source == MessageSource.telegram) {
+                    final phone = PhoneUtils.normalizeRuPhone(ch.handle);
+                    if (phone.isNotEmpty) {
+                      await _openTelegramByPhone(contactId: contact.id, phoneE164: phone);
+                      return;
+                    }
+                  }
+
                   Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) => ChatPage(
@@ -143,6 +194,88 @@ class _ContactPageState extends State<ContactPage> {
       if (ch.isPrimary) return ch;
     }
     return contact.channels.isNotEmpty ? contact.channels.first : null;
+  }
+
+  Future<void> _openTelegramByPhone({required String contactId, required String phoneE164}) async {
+    // Show progress while we ask the bridge to create a portal room.
+    if (!mounted) return;
+    final progress = ValueNotifier<String>('Подключаюсь к Matrix…');
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Center(
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Theme.of(ctx).dialogBackgroundColor,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: ValueListenableBuilder<String>(
+            valueListenable: progress,
+            builder: (_, v, __) => Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 12),
+                Text(v, textAlign: TextAlign.center),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    String? roomId;
+    try {
+      final ok = await MatrixService.instance.ensureOnline(timeout: const Duration(seconds: 6), requireFreshSync: true);
+      if (!ok) {
+        roomId = null;
+      } else {
+        roomId = await BridgeChatLauncher.openTelegramByPhone(
+          phoneE164,
+          displayName: ContactStore.instance.tryGet(contactId)?.preferredTitle,
+          onProgress: (stage) => progress.value = stage,
+        );
+      }
+    } catch (_) {
+      roomId = null;
+    }
+
+    progress.dispose();
+
+    if (mounted) Navigator.of(context).pop();
+
+    if (roomId == null || roomId.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось создать Telegram-чат через мост. Если только что был офлайн — переподключи Matrix в настройках и попробуй снова.')),
+      );
+      return;
+    }
+
+    // Promote to non-null outside of closures.
+    final rid = roomId;
+
+    // Create/refresh a conversation entry pointing to the REAL Matrix room id.
+    ConversationStore.instance.upsertPreview(
+      source: MessageSource.telegram,
+      handle: rid,
+      contactId: contactId,
+      lastMessage: 'Telegram: $phoneE164',
+      updatedAt: DateTime.now(),
+    );
+    await DbService.instance.linkRoomToContact(roomId: rid, contactId: contactId);
+
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ChatPage(
+          contactId: contactId,
+          channelSource: MessageSource.telegram,
+          channelHandle: rid,
+        ),
+      ),
+    );
   }
 
   Future<void> _openEditContactSheet(Contact contact) async {

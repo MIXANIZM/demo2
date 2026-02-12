@@ -187,6 +187,15 @@ _RoomIdentity _computeIdentity(Room room) {
       _log('purged old matrix conversations: $removedOld');
     }
 
+    // Hide bridge management rooms ("Bridge bot") from Inbox.
+    // These rooms exist only to send commands to mautrix bots.
+    final removedBot = ConversationStore.instance.removeWhere(
+      (c) => c.source == MessageSource.telegram && c.lastMessage.contains('Matrix: Bridge bot'),
+    );
+    if (removedBot > 0) {
+      _log('removed bridge bot conversations: $removedBot');
+    }
+
     int updated = 0;
 
     for (final room in client.rooms) {
@@ -194,6 +203,11 @@ _RoomIdentity _computeIdentity(Room room) {
         final ident = _computeIdentity(room);
         final title = ident.title;
         final phoneOrUsername = ident.phoneOrUsername;
+
+        // Skip bridge management DM rooms.
+        if (title.trim().toLowerCase() == 'bridge bot') {
+          continue;
+        }
 
         // Best-effort last message preview.
         String preview = 'Matrix: $title';

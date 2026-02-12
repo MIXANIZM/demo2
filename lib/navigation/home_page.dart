@@ -3,21 +3,26 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../features/inbox/inbox_page.dart';
 import '../features/contact/contact_page.dart';
+import '../features/chat/chat_page.dart';
 import '../features/profile/profile_page.dart';
 import '../features/structure/structure_page.dart';
 import '../features/tasks/tasks_page.dart';
 import '../shared/label_catalog.dart';
 import '../shared/label_models.dart';
 import '../shared/contact_store.dart';
-import '../shared/external_chat_launcher.dart';
+import '../shared/contact_models.dart';
+import '../shared/bridge_chat_launcher.dart';
 import '../shared/conversation_store.dart';
+import '../shared/db_service.dart';
 import '../shared/incoming_gateway.dart';
 import '../shared/message_source.dart';
 import '../shared/phone_utils.dart';
 import '../shared/source_settings_store.dart';
+import '../matrix/matrix_service.dart';
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
@@ -178,6 +183,8 @@ class _HomeShellState extends State<HomeShell> {
     final phoneCtrl = TextEditingController();
     bool addWhatsApp = true;
     bool addTelegram = true;
+    bool busy = false;
+    String tgStage = '';
 
     if (!mounted) return;
     await showModalBottomSheet<void>(
@@ -191,22 +198,127 @@ class _HomeShellState extends State<HomeShell> {
             final canPaste = suggested.isNotEmpty && normalized.isEmpty;
 
             Future<void> safeOpenTelegram() async {
-              final ok = await ExternalChatLauncher.openTelegram(normalized);
-              if (!ctx.mounted) return;
-              if (!ok) {
-                ScaffoldMessenger.of(ctx).showSnackBar(
-                  const SnackBar(content: Text('Не удалось открыть Telegram для этого номера')),
+              if (busy) return;
+              setLocal(() => busy = true);
+              // Создаем контакт, но не создаем Telegram-канал по номеру (он фейковый).
+              try {
+                final c = ContactStore.instance.getOrCreateByPhone(
+                  phoneInput: normalized,
+                  addWhatsApp: false,
+                  addTelegram: false,
                 );
+
+                // Ask bridge to create the portal room and wait for it.
+                // Проверим реальную связность (connected может быть true даже без сети).
+                final ok = await MatrixService.instance.ensureOnline(timeout: const Duration(seconds: 6));
+                if (!ok) {
+                  if (!ctx.mounted) return;
+                  ScaffoldMessenger.of(ctx).showSnackBar(
+                    const SnackBar(content: Text('Нет соединения с Matrix-сервером. Открой Настройки → Matrix Test и переподключись, потом попробуй снова.')),
+                  );
+                  return;
+                }
+                setLocal(() {
+                  tgStage = 'Запуск…';
+                });
+                final roomId = await BridgeChatLauncher.openTelegramByPhone(
+                  normalized,
+                  displayName: c.preferredTitle,
+                  onProgress: (s) {
+                    if (!ctx.mounted) return;
+                    setLocal(() => tgStage = s);
+                  },
+                );
+                if (!ctx.mounted) return;
+                if (roomId == null || roomId.isEmpty) {
+                  ScaffoldMessenger.of(ctx).showSnackBar(
+                    SnackBar(
+                      content: const Text(
+                        'Мост не создал чат по номеру. Обычно это значит, что номер ещё не попал в Telegram-контакты аккаунта, под которым залогинен мост.\n'
+                        'Сохрани контакт и открой Telegram (официальный) на минуту, чтобы он синхронизировал контакты, затем нажми ещё раз.',
+                      ),
+                      action: SnackBarAction(
+                        label: 'Открыть Telegram',
+                        onPressed: () async {
+                          // Try deep-link first, fallback to web.
+                          final ok = await launchUrl(Uri.parse('tg://'), mode: LaunchMode.externalApplication);
+                          if (!ok) {
+                            await launchUrl(Uri.parse('https://t.me/'), mode: LaunchMode.externalApplication);
+                          }
+                        },
+                      ),
+                      duration: const Duration(seconds: 6),
+                    ),
+                  );
+                  return;
+                }
+
+                // Pin room->contact mapping so later we can show it as one person.
+                ConversationStore.instance.upsertPreview(
+                  source: MessageSource.telegram,
+                  handle: roomId,
+                  contactId: c.id,
+                  lastMessage: 'Telegram: $normalized',
+                  updatedAt: DateTime.now(),
+                );
+                await DbService.instance.linkRoomToContact(roomId: roomId, contactId: c.id);
+
+                Navigator.of(ctx).pop();
+                if (!mounted) return;
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => ChatPage(
+                      contactId: c.id,
+                      channelSource: MessageSource.telegram,
+                      channelHandle: roomId,
+                    ),
+                  ),
+                );
+              } catch (e) {
+                if (!ctx.mounted) return;
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  SnackBar(content: Text('Ошибка при создании чата через мост: $e')),
+                );
+              } finally {
+                if (ctx.mounted) {
+                  setLocal(() {
+                    busy = false;
+                    tgStage = '';
+                  });
+                }
               }
             }
 
             Future<void> safeOpenWhatsApp() async {
-              final ok = await ExternalChatLauncher.openWhatsApp(normalized);
-              if (!ctx.mounted) return;
-              if (!ok) {
-                ScaffoldMessenger.of(ctx).showSnackBar(
-                  const SnackBar(content: Text('Не удалось открыть WhatsApp для этого номера')),
+              if (busy) return;
+              setLocal(() => busy = true);
+              ContactStore.instance.getOrCreateByPhone(
+                phoneInput: normalized,
+                addWhatsApp: false,
+                addTelegram: false,
+              );
+
+              try {
+                final ok = await BridgeChatLauncher.openWhatsAppByPhone(normalized);
+                if (!ctx.mounted) return;
+                if (!ok) {
+                  ScaffoldMessenger.of(ctx).showSnackBar(
+                    const SnackBar(content: Text('Matrix не подключён — сначала подключи мост')),
+                  );
+                  return;
+                }
+
+                Navigator.of(ctx).pop();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Отправил команду мосту. Жди приглашение в чат от бота.')),
                 );
+              } catch (e) {
+                if (!ctx.mounted) return;
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  SnackBar(content: Text('Ошибка при запуске WhatsApp через мост: $e')),
+                );
+              } finally {
+                if (ctx.mounted) setLocal(() => busy = false);
               }
             }
 
@@ -270,28 +382,42 @@ class _HomeShellState extends State<HomeShell> {
                             children: [
                               Expanded(
                                 child: FilledButton.icon(
-                                  onPressed: () async => safeOpenTelegram(),
-                                  icon: const Icon(Icons.send),
-                                  label: const Text('Telegram'),
+                                  onPressed: busy ? null : () async => safeOpenTelegram(),
+                                  icon: busy
+                                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                                      : const Icon(Icons.send),
+                                  label: Text(busy ? 'Ожидаю…' : 'Telegram'),
                                 ),
                               ),
                               const SizedBox(width: 12),
                               Expanded(
                                 child: FilledButton.icon(
-                                  onPressed: () async => safeOpenWhatsApp(),
-                                  icon: const Icon(Icons.chat),
-                                  label: const Text('WhatsApp'),
+                                  onPressed: busy ? null : () async => safeOpenWhatsApp(),
+                                  icon: busy
+                                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                                      : const Icon(Icons.chat),
+                                  label: Text(busy ? 'Ожидаю…' : 'WhatsApp'),
                                 ),
                               ),
                             ],
                           ),
                           const SizedBox(height: 8),
+                          if (tgStage.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Text(
+                                tgStage,
+                                style: const TextStyle(fontSize: 12, color: Colors.black54),
+                              ),
+                            ),
                           TextButton.icon(
                             onPressed: () {
                               final c = ContactStore.instance.getOrCreateByPhone(
                                 phoneInput: normalized,
                                 addWhatsApp: addWhatsApp,
-                                addTelegram: addTelegram,
+                                // IMPORTANT: do NOT create a Telegram channel by phone.
+                                // Telegram chats in this app are backed by Matrix room ids.
+                                addTelegram: false,
                               );
                               if (addWhatsApp) {
                                 _conversations.ensureConversation(
@@ -301,14 +427,7 @@ class _HomeShellState extends State<HomeShell> {
                                   lastMessage: 'Контакт создан',
                                 );
                               }
-                              if (addTelegram) {
-                                _conversations.ensureConversation(
-                                  source: MessageSource.telegram,
-                                  handle: normalized,
-                                  contactId: c.id,
-                                  lastMessage: 'Контакт создан',
-                                );
-                              }
+                              // Telegram conversation is created only after the bridge creates a real portal room.
 
                               Navigator.of(ctx).pop();
 
