@@ -51,55 +51,16 @@ class _ContactPageState extends State<ContactPage> {
       appBar: AppBar(
         title: Text(contact.preferredTitle),
         actions: [
-        IconButton(
-          icon: const Icon(Icons.edit),
-          onPressed: () => _edit(context),
-        ),
-        PopupMenuButton<String>(
-          onSelected: (v) async {
-            if (v == 'delete_dialogs') {
-              final ok = await showDialog<bool>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: const Text('Удалить диалоги'),
-                  content: const Text('Удалить локальную историю переписок по этому контакту (в приложении)? В Telegram ничего не удалится.'),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-                    TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить')),
-                  ],
-                ),
-              );
-              if (ok != true) return;
-              final roomIds = await DbService.instance.getLinkedRoomIdsForContact(contact.id);
-              for (final rid in roomIds) {
-                await ConversationStore.instance.deleteConversation(rid);
-              }
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Диалоги удалены (локально).')));
-              }
-            } else if (v == 'delete_contact') {
-              final ok = await showDialog<bool>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: const Text('Удалить контакт'),
-                  content: const Text('Удалить контакт и всю локальную историю по нему? В Telegram контакт/чат не удалятся.'),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-                    TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить')),
-                  ],
-                ),
-              );
-              if (ok != true) return;
-              await ContactStore.instance.deleteContact(contact.id);
-              if (context.mounted) Navigator.pop(context);
-            }
-          },
-          itemBuilder: (ctx) => const [
-            PopupMenuItem(value: 'delete_dialogs', child: Text('Удалить диалоги (локально)')),
-            PopupMenuItem(value: 'delete_contact', child: Text('Удалить контакт (локально)')),
-          ],
-        ),
-      ],
+          IconButton(
+            tooltip: 'Редактировать',
+            icon: const Icon(Icons.edit_outlined),
+            onPressed: () async {
+              await _openEditContactSheet(contact);
+              if (!mounted) return;
+              setState(() {});
+            },
+          ),
+        ],
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),

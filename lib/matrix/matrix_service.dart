@@ -694,6 +694,12 @@ Future<String?> createTelegramPortalByPhone(
       await dm.sendTextEvent('add-contact $phoneE164 $first $last');
       await Future.delayed(const Duration(milliseconds: 800));
 
+      final importedTgId = await _waitForBotRegex(
+        dm: dm,
+        pattern: RegExp(r'\bID\s+(\d{4,})\b'),
+        timeout: const Duration(seconds: 10),
+      );
+
       onProgress?.call('Синхронизирую контакты…');
       await dm.sendTextEvent('sync contacts');
       await Future.delayed(const Duration(milliseconds: 1200));
@@ -701,8 +707,18 @@ Future<String?> createTelegramPortalByPhone(
       onProgress?.call('Создаю чат…');
       await dm.sendTextEvent('pm $phoneE164');
       onProgress?.call('Ожидаю комнату…');
-      // Иногда мост создаёт комнату мгновенно или она уже была создана ранее
-      roomId ??= _findRoomByNameOrPhone(phone: phone, displayName: displayName);
+
+      final expectedPuppetMxid = importedTgId == null
+          ? null
+          : '@telegram_${importedTgId}:${_client!.homeserver!.host}';
+
+      // If the portal already exists (or got created very fast), it may already be present.
+      if (expectedPuppetMxid != null) {
+        final existing = _findDirectRoomWithMxid(expectedPuppetMxid);
+        if (existing != null) {
+          return existing;
+        }
+      }
 
       // Важный момент: портал-рум может называться как угодно (имя контакта),
       // поэтому искать по номеру в displayname ненадёжно.
@@ -745,6 +761,11 @@ Future<String?> createTelegramPortalByPhone(
         await _autoJoinInvites(reason: 'waitNewJoinedRoom');
       } catch (_) {}
 
+        if (expectedDirectMxid != null) {
+          final found = _findDirectRoomWithMxid(expectedDirectMxid);
+          if (found != null) return found;
+        }
+
       String? best;
       int bestScore = -1;
       for (final r in client.rooms) {
@@ -770,53 +791,6 @@ Future<String?> createTelegramPortalByPhone(
 
       if (best != null) return best;
       await Future.delayed(const Duration(milliseconds: 600));
-    }
-    return null;
-  }
-
-
-  String? _findRoomByNameOrPhone({
-    required String phone,
-    required String displayName,
-  }) {
-    final phoneDigits = phone.replaceAll(RegExp(r'[^0-9+]'), '');
-    for (final r in client.rooms) {
-      try {
-        if (r.membership != Membership.join) continue;
-        final name = (r.displayname ?? '').trim();
-        final topic = (r.topic ?? '').trim();
-        if (name.isEmpty && topic.isEmpty) continue;
-
-        bool match(String s) {
-          final t = s.trim();
-          if (t.isEmpty) return false;
-          if (t.contains(displayName)) return true;
-          if (phoneDigits.isNotEmpty && t.contains(phoneDigits)) return true;
-          if (t.contains(phone)) return true;
-          return false;
-        }
-
-        if (match(name) || match(topic)) {
-          return r.id;
-        }
-      } catch (_) {
-        // ignore
-      }
-    }
-    return null;
-  }
-
-  Future<String?> _pollFindRoomByNameOrPhone({
-    required String phone,
-    required String displayName,
-    required Duration timeout,
-    Duration step = const Duration(seconds: 1),
-  }) async {
-    final endAt = DateTime.now().add(timeout);
-    while (DateTime.now().isBefore(endAt)) {
-      final found = _findRoomByNameOrPhone(phone: phone, displayName: displayName);
-      if (found != null) return found;
-      await Future.delayed(step);
     }
     return null;
   }
@@ -920,10 +894,67 @@ Future<bool> startWhatsAppPmByPhone(String phoneE164) async {
     return false;
   }
 }
-}
-    final existing = _findRoomByNameOrPhone(phone: phone, displayName: displayName);
-    if (existing != null) {
-      onProgress?.call('Чат уже существует, открываю…');
-      return existing;
+
+
+  Future<void> _autoJoinInvites({required String reason}) async {
+    final client = _client;
+    if (client == null) return;
+
+    for (final room in client.rooms) {
+      try {
+        if (room.membership == Membership.invite) {
+          await client.joinRoom(room.id);
+        }
+      } catch (_) {
+        // ignore
+      }
+    }
+  }
+
+  String? _findDirectRoomWithMxid(String mxid) {
+    final client = _client;
+    if (client == null) return null;
+
+    for (final room in client.rooms) {
+      try {
+        final isDirect = room.isDirectChat == true;
+        final joined = room.membership == Membership.join;
+        if (isDirect && joined && room.directChatMatrixID == mxid) {
+          return room.id;
+        }
+      } catch (_) {
+        // ignore
+      }
+    }
+    return null;
+  }
+
+  Future<String?> _waitForBotRegex({
+    required Room dm,
+    required RegExp pattern,
+    required Duration timeout,
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+
+    while (DateTime.now().isBefore(deadline)) {
+      final events = dm.timeline?.events ?? const [];
+      for (final e in events.reversed) {
+        try {
+          final body = e.content.tryGet<String>('body');
+          if (body == null) continue;
+          final m = pattern.firstMatch(body);
+          if (m != null) {
+            return m.group(1);
+          }
+        } catch (_) {
+          // ignore
+        }
+      }
+
+      await Future.delayed(const Duration(milliseconds: 350));
     }
 
+    return null;
+  }
+
+}

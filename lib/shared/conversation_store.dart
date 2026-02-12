@@ -348,11 +348,4 @@ void touchConversation(
 
 
   String _newId() => DateTime.now().microsecondsSinceEpoch.toString();
-
-  Future<void> deleteConversation(String roomId) async {
-    await DbService.instance.deleteConversationLocal(roomId);
-    _conversations.removeWhere((c) => c.id == roomId);
-    _bump();
-  }
-
 }

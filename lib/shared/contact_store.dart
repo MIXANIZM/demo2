@@ -248,15 +248,7 @@ class ContactStore {
     _bump();
   }
 
-  
-  Future<void> deleteContact(String contactId) async {
-    await DbService.instance.deleteContactLocal(contactId);
-    _contacts.remove(contactId);
-    _rebuildIndexes();
-    _bump();
-  }
-
-Future<void> removeChannel(String contactId, MessageSource source) async {
+  Future<void> removeChannel(String contactId, MessageSource source) async {
     final c = _byId[contactId];
     if (c == null) return;
     final wasPrimary = c.channels.any((ch) => ch.source == source && ch.isPrimary);
@@ -405,15 +397,7 @@ Future<void> removeChannel(String contactId, MessageSource source) async {
     }
   }
 
-  
-  void _rebuildIndexes() {
-    _bySourceHandle.clear();
-    for (final c in _contacts.values) {
-      _reindexContact(c);
-    }
-  }
-
-void _reindexContact(Contact c) {
+  void _reindexContact(Contact c) {
     // Удалять старые индексы точечно сложно без хранения обратных ссылок,
     // поэтому делаем простой, но безопасный способ: переиндексируем добавлением.
     for (final ch in c.channels) {
