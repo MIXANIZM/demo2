@@ -239,8 +239,8 @@ class ConversationStore {
       );
     }
 
-    // Для Matrix-диалогов handle обычно = room_id. Сохраняем явную привязку.
-    if (conv.source == MessageSource.matrix) {
+    // Для Matrix-диалогов handle обычно = room_id (начинается с '!'). Сохраняем явную привязку.
+    if (conv.handle.startsWith('!') || conv.source == MessageSource.matrix) {
       await DbService.instance.linkRoomToContact(roomId: conv.handle, contactId: contactId);
     }
 

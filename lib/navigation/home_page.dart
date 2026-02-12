@@ -12,6 +12,7 @@ import '../features/tasks/tasks_page.dart';
 import '../shared/label_catalog.dart';
 import '../shared/label_models.dart';
 import '../shared/contact_store.dart';
+import '../shared/external_chat_launcher.dart';
 import '../shared/conversation_store.dart';
 import '../shared/incoming_gateway.dart';
 import '../shared/message_source.dart';
@@ -156,8 +157,12 @@ class _HomeShellState extends State<HomeShell> {
       );
     }
     if (_currentIndex == 0) {
-      // Входящие: симулятор отключён (только реальные источники).
-      return null;
+      // Входящие: быстрый старт чата по номеру.
+      return FloatingActionButton(
+        onPressed: _openQuickAddContact,
+        tooltip: 'Написать по номеру',
+        child: const Icon(Icons.chat),
+      );
     }
 
     return null;
@@ -184,6 +189,26 @@ class _HomeShellState extends State<HomeShell> {
             final normalized = PhoneUtils.normalizeRuPhone(raw);
             final canSave = normalized.isNotEmpty;
             final canPaste = suggested.isNotEmpty && normalized.isEmpty;
+
+            Future<void> safeOpenTelegram() async {
+              final ok = await ExternalChatLauncher.openTelegram(normalized);
+              if (!ctx.mounted) return;
+              if (!ok) {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  const SnackBar(content: Text('Не удалось открыть Telegram для этого номера')),
+                );
+              }
+            }
+
+            Future<void> safeOpenWhatsApp() async {
+              final ok = await ExternalChatLauncher.openWhatsApp(normalized);
+              if (!ctx.mounted) return;
+              if (!ok) {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  const SnackBar(content: Text('Не удалось открыть WhatsApp для этого номера')),
+                );
+              }
+            }
 
             return SafeArea(
               child: Padding(
@@ -226,47 +251,78 @@ class _HomeShellState extends State<HomeShell> {
                       style: TextStyle(fontSize: 12, color: Colors.black54),
                     ),
                     const SizedBox(height: 12),
-                    FilledButton.icon(
-                      onPressed: canPaste
-                          ? () => setLocal(() { raw = suggested; phoneCtrl.text = suggested; })
-                          : (!canSave
-                              ? null
-                              : () {
-                                  final c = ContactStore.instance.getOrCreateByPhone(
-                                    phoneInput: normalized,
-                                    addWhatsApp: addWhatsApp,
-                                    addTelegram: addTelegram,
-                                  );
-                                  if (addWhatsApp) {
-                                    _conversations.ensureConversation(
-                                      source: MessageSource.whatsapp,
-                                      handle: normalized,
-                                      contactId: c.id,
-                                      lastMessage: 'Контакт создан',
-                                    );
-                                  }
-                                  if (addTelegram) {
-                                    _conversations.ensureConversation(
-                                      source: MessageSource.telegram,
-                                      handle: normalized,
-                                      contactId: c.id,
-                                      lastMessage: 'Контакт создан',
-                                    );
-                                  }
+                    if (normalized.isEmpty)
+                      FilledButton.icon(
+                        onPressed: canPaste
+                            ? () => setLocal(() {
+                                  raw = suggested;
+                                  phoneCtrl.text = suggested;
+                                })
+                            : null,
+                        icon: const Icon(Icons.content_paste),
+                        label: Text(canPaste ? 'Вставить $suggested' : 'Введите телефон'),
+                      )
+                    else
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: FilledButton.icon(
+                                  onPressed: () async => safeOpenTelegram(),
+                                  icon: const Icon(Icons.send),
+                                  label: const Text('Telegram'),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: FilledButton.icon(
+                                  onPressed: () async => safeOpenWhatsApp(),
+                                  icon: const Icon(Icons.chat),
+                                  label: const Text('WhatsApp'),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          TextButton.icon(
+                            onPressed: () {
+                              final c = ContactStore.instance.getOrCreateByPhone(
+                                phoneInput: normalized,
+                                addWhatsApp: addWhatsApp,
+                                addTelegram: addTelegram,
+                              );
+                              if (addWhatsApp) {
+                                _conversations.ensureConversation(
+                                  source: MessageSource.whatsapp,
+                                  handle: normalized,
+                                  contactId: c.id,
+                                  lastMessage: 'Контакт создан',
+                                );
+                              }
+                              if (addTelegram) {
+                                _conversations.ensureConversation(
+                                  source: MessageSource.telegram,
+                                  handle: normalized,
+                                  contactId: c.id,
+                                  lastMessage: 'Контакт создан',
+                                );
+                              }
 
-                                  Navigator.of(ctx).pop();
+                              Navigator.of(ctx).pop();
 
-                                  // Открываем карточку контакта
-                                  if (!mounted) return;
-                                  Navigator.of(context).push(
-                                    MaterialPageRoute(builder: (_) => ContactPage(contactId: c.id)),
-                                  );
-                                }),
-                      icon: Icon(canPaste ? Icons.content_paste : Icons.person_add),
-                      label: Text(
-                        canPaste ? 'Вставить $suggested' : (canSave ? 'Сохранить $normalized' : 'Введите телефон'),
+                              // Открываем карточку контакта
+                              if (!mounted) return;
+                              Navigator.of(context).push(
+                                MaterialPageRoute(builder: (_) => ContactPage(contactId: c.id)),
+                              );
+                            },
+                            icon: const Icon(Icons.person_add),
+                            label: Text('Сохранить контакт $normalized'),
+                          ),
+                        ],
                       ),
-                    ),
                   ],
                 ),
               ),

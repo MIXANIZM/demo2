@@ -114,10 +114,9 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   bool _loading = true;
 
   Future<void> _openLinkToContactSheet() async {
-    if (widget.conversationId == null) return;
-    if (widget.channelSource != MessageSource.matrix) return;
-
-    // Matrix room ids are typically like '!....:server'
+    if (_effectiveConversationId == null) return;
+    // Matrix room ids are typically like '!....:server'.
+    // Note: even when the UI shows "Telegram", bridged chats still have Matrix room ids.
     final isRoomId = widget.channelHandle.startsWith('!');
     if (!isRoomId) return;
 
@@ -138,7 +137,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
 
     final convStore = ref.read(conversationStoreProvider);
     await convStore.linkConversationToContact(
-      widget.conversationId!,
+      _effectiveConversationId!,
       selectedContactId,
       alsoUpsertChannel: true,
     );
@@ -149,7 +148,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
         builder: (_) => ChatPage(
-          conversationId: widget.conversationId,
+          conversationId: _effectiveConversationId,
           contactId: selectedContactId,
           channelSource: widget.channelSource,
           channelHandle: widget.channelHandle,
@@ -1030,9 +1029,7 @@ Widget build(BuildContext context) {
                     }
                   },
                   itemBuilder: (context) {
-                    final canLink = widget.conversationId != null &&
-                        widget.channelSource == MessageSource.matrix &&
-                        widget.channelHandle.startsWith('!');
+                    final canLink = _effectiveConversationId != null && widget.channelHandle.startsWith('!');
                     return [
                       PopupMenuItem<_ChatMenuAction>(
                         value: _ChatMenuAction.linkToContact,
