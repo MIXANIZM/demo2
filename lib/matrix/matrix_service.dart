@@ -48,6 +48,12 @@ class MatrixService {
   StreamSubscription? _syncSub;
   DateTime? _lastSyncAt;
 
+  /// Expected Telegram puppet MXID for the next DM that the bridge creates.
+  /// Used to auto-open the correct room after "pm <phone>".
+  String? _expectedDirectMxid;
+
+  String? get expectedDirectMxid => _expectedDirectMxid;
+
   // Cache management-room ids for bridge bots to avoid creating multiple DMs.
   final Map<String, String> _botDmRoomIdByMxid = <String, String>{};
 
@@ -712,10 +718,14 @@ Future<String?> createTelegramPortalByPhone(
           ? null
           : '@telegram_${importedTgId}:${_client!.homeserver!.host}';
 
+      // Remember the expected puppet for auto-detection in _waitNewJoinedRoom.
+      _expectedDirectMxid = expectedPuppetMxid;
+
       // If the portal already exists (or got created very fast), it may already be present.
       if (expectedPuppetMxid != null) {
         final existing = _findDirectRoomWithMxid(expectedPuppetMxid);
         if (existing != null) {
+          _expectedDirectMxid = null;
           return existing;
         }
       }
@@ -727,7 +737,10 @@ Future<String?> createTelegramPortalByPhone(
       if (roomId == null) {
         // 1) Фоллбек: ждём появление новой комнаты (invite/join)
         final created = await _waitNewJoinedRoom(beforeRooms, timeout: timeout);
-        if (created != null) return created;
+        if (created != null) {
+          _expectedDirectMxid = null;
+          return created;
+        }
 
         // 2) Старый фоллбек на эвристику по номеру.
         return await waitTelegramPortalRoomByPhone(phoneE164);
@@ -741,6 +754,7 @@ Future<String?> createTelegramPortalByPhone(
         }
       } catch (_) {}
 
+      _expectedDirectMxid = null;
       return roomId;
     } catch (e) {
       _log('createTelegramPortalByPhone error: $e');
@@ -757,14 +771,21 @@ Future<String?> createTelegramPortalByPhone(
     final end = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(end)) {
       try {
+        // Force a sync tick so newly created portal rooms become visible even
+        // if the background sync loop is currently stopped/suspended.
+        await refreshOnce();
+
         // Accept invites eagerly.
         await _autoJoinInvites(reason: 'waitNewJoinedRoom');
       } catch (_) {}
 
-        if (expectedDirectMxid != null) {
-          final found = _findDirectRoomWithMxid(expectedDirectMxid);
-          if (found != null) return found;
-        }
+			// `expectedDirectMxid` is a getter returning `String?`.
+			// Capture it into a local variable so nullability is narrowed.
+			final mxid = expectedDirectMxid;
+			if (mxid != null) {
+			  final found = _findDirectRoomWithMxid(mxid);
+			  if (found != null) return found;
+			}
 
       String? best;
       int bestScore = -1;
@@ -895,22 +916,6 @@ Future<bool> startWhatsAppPmByPhone(String phoneE164) async {
   }
 }
 
-
-  Future<void> _autoJoinInvites({required String reason}) async {
-    final client = _client;
-    if (client == null) return;
-
-    for (final room in client.rooms) {
-      try {
-        if (room.membership == Membership.invite) {
-          await client.joinRoom(room.id);
-        }
-      } catch (_) {
-        // ignore
-      }
-    }
-  }
-
   String? _findDirectRoomWithMxid(String mxid) {
     final client = _client;
     if (client == null) return null;
@@ -937,7 +942,9 @@ Future<bool> startWhatsAppPmByPhone(String phoneE164) async {
     final deadline = DateTime.now().add(timeout);
 
     while (DateTime.now().isBefore(deadline)) {
-      final events = dm.timeline?.events ?? const [];
+      // In matrix SDK 6.x Room.timeline is gone; use getTimeline().
+      final tl = await dm.getTimeline(limit: 50);
+      final events = tl.events;
       for (final e in events.reversed) {
         try {
           final body = e.content.tryGet<String>('body');
