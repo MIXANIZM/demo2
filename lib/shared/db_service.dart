@@ -504,6 +504,49 @@ Future<List<StoredChatMessage>> loadMessages({
     out.sort((a, b) => a.createdAtMs.compareTo(b.createdAtMs));
     return out;
   }
+
+  Future<void> deleteConversation(String conversationId) async {
+    // Messages are stored in the raw SQL `messages` table.
+    await db.customStatement(
+      'DELETE FROM messages WHERE conversation_id = ?;',
+      [conversationId],
+    );
+
+    // Conversation state is stored in Drift.
+    await (db.delete(db.conversationStateTable)
+          ..where((t) => t.conversationId.equals(conversationId)))
+        .go();
+
+    // Conversation row.
+    await (db.delete(db.conversationsTable)
+          ..where((t) => t.id.equals(conversationId)))
+        .go();
+  }
+
+  Future<void> deleteContact(String contactId) async {
+    // Remove all conversations for this contact (and related messages).
+    final convs = await (db.select(db.conversationsTable)
+          ..where((t) => t.contactId.equals(contactId)))
+        .get();
+    for (final c in convs) {
+      await deleteConversation(c.id);
+    }
+
+    // Contact related tables.
+    await (db.delete(db.contactNotesTable)
+          ..where((t) => t.contactId.equals(contactId)))
+        .go();
+    await (db.delete(db.contactLabelsTable)
+          ..where((t) => t.contactId.equals(contactId)))
+        .go();
+    await (db.delete(db.contactChannelsTable)
+          ..where((t) => t.contactId.equals(contactId)))
+        .go();
+
+    // Contact row.
+    await (db.delete(db.contactsTable)..where((t) => t.id.equals(contactId)))
+        .go();
+  }
 }
 
 

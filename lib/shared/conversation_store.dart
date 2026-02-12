@@ -291,7 +291,16 @@ class ConversationStore {
     return removed;
   }
 
-void markAsRead(String conversationId) {
+  Future<void> deleteConversation(String conversationId) async {
+    final before = _conversations.length;
+    _conversations.removeWhere((c) => c.id == conversationId);
+    if (_conversations.length != before) {
+      version.value++;
+    }
+    await DbService.instance.deleteConversation(conversationId);
+  }
+
+  void markAsRead(String conversationId) {
     final c = _conversations.cast<Conversation?>().firstWhere(
           (x) => x != null && x.id == conversationId,
           orElse: () => null,

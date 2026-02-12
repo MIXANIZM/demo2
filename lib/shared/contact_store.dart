@@ -411,6 +411,21 @@ class ContactStore {
     }
   }
 
+  void _deindexContact(String contactId) {
+    _byChannelKey.removeWhere((_, v) => v == contactId);
+    _byPhoneKey.removeWhere((_, v) => v == contactId);
+  }
+
+  Future<void> deleteContact(String contactId) async {
+    final idx = _contacts.indexWhere((c) => c.id == contactId);
+    if (idx < 0) return;
+    _contacts.removeAt(idx);
+    _deindexContact(contactId);
+    notifyListeners();
+
+    await DbService.instance.deleteContact(contactId);
+  }
+
   void _persist(Contact c) {
     // fire-and-forget, без await
     unawaited(DbService.instance.upsertContact(c));

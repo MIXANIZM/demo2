@@ -60,6 +60,45 @@ class _ContactPageState extends State<ContactPage> {
               setState(() {});
             },
           ),
+          PopupMenuButton<String>(
+            tooltip: 'Ещё',
+            onSelected: (v) async {
+              if (v == 'delete_contact') {
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) {
+                    return AlertDialog(
+                      title: const Text('Удалить контакт?'),
+                      content: const Text(
+                        'Контакт будет удалён из базы приложения вместе с каналами, заметками, ярлыками и чатами внутри приложения. В Telegram/WhatsApp это ничего не удалит.',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(false),
+                          child: const Text('Отмена'),
+                        ),
+                        FilledButton(
+                          onPressed: () => Navigator.of(ctx).pop(true),
+                          child: const Text('Удалить'),
+                        ),
+                      ],
+                    );
+                  },
+                );
+                if (ok == true) {
+                  await ContactStore.instance.deleteContact(contact.id);
+                  if (!mounted) return;
+                  Navigator.of(context).pop();
+                }
+              }
+            },
+            itemBuilder: (ctx) => const [
+              PopupMenuItem(
+                value: 'delete_contact',
+                child: Text('Удалить контакт'),
+              ),
+            ],
+          ),
         ],
       ),
       body: ListView(

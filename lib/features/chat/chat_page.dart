@@ -45,6 +45,7 @@ class ChatPage extends ConsumerStatefulWidget {
 
 enum _ChatMenuAction {
   linkToContact,
+  deleteDialog,
 }
 class _ChatPageState extends ConsumerState<ChatPage> {
   // Local/optimistic map of MY reactions per message (supports Telegram Premium-style up to 3)
@@ -155,6 +156,37 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         ),
       ),
     );
+  }
+
+  Future<void> _confirmAndDeleteDialog() async {
+    final id = _effectiveConversationId;
+    if (id == null) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Удалить диалог?'),
+          content: const Text(
+            'Диалог будет удалён только из базы данных приложения (сообщения и чат в Telegram не трогаются).',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Отмена'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Удалить'),
+            ),
+          ],
+        );
+      },
+    );
+    if (ok != true) return;
+    final convStore = ref.read(conversationStoreProvider);
+    await convStore.deleteConversation(id);
+    if (!mounted) return;
+    Navigator.of(context).pop();
   }
   @override
   void initState() {
@@ -1026,6 +1058,9 @@ Widget build(BuildContext context) {
                       case _ChatMenuAction.linkToContact:
                         _openLinkToContactSheet();
                         break;
+                      case _ChatMenuAction.deleteDialog:
+                        _confirmAndDeleteDialog();
+                        break;
                     }
                   },
                   itemBuilder: (context) {
@@ -1035,6 +1070,11 @@ Widget build(BuildContext context) {
                         value: _ChatMenuAction.linkToContact,
                         enabled: canLink,
                         child: const Text('Привязать к контакту'),
+                      ),
+                      PopupMenuItem<_ChatMenuAction>(
+                        value: _ChatMenuAction.deleteDialog,
+                        enabled: effectiveConversationId != null,
+                        child: const Text('Удалить диалог (в приложении)'),
                       ),
                     ];
                   },
